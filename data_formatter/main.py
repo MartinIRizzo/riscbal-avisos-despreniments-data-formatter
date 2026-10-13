@@ -1,10 +1,14 @@
 import os
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
+import geopandas as gpd
+import seaborn as sns
 from dotenv import load_dotenv
 
 from aemet_formatter import format_aemet_data
+from data_formatter.eda import dataframe_analysis
 from data_formatter.prec_accumulation import get_prec_accumulations_by_date
 
 load_dotenv()
@@ -19,7 +23,7 @@ df_stations = pd.read_csv(
 
 # df_stations.to_csv(RESULTS_PATH / 'stations.csv', index=True, index_label="id")
 
-df_samples = pd.read_csv(DATA_PATH / 'samples.csv', sep=';')
+df_samples = pd.read_csv(DATA_PATH / 'samples.csv', sep=';', decimal=',')
 #
 # df_samples = df_samples.drop(columns=[
 #    "OBJECTID_1", "Tipo", "Tipo_code", "Material",
@@ -76,7 +80,7 @@ samples_with_station_df = pd.merge(
 )
 
 samples_with_station_df = samples_with_station_df.drop(columns=[
-    'utm_x', 'utm_y', "id_station", "id"
+    'utm_x', 'utm_y', "id"
 ])
 
 os.makedirs(RESULTS_PATH, exist_ok=True)
@@ -85,7 +89,7 @@ samples_with_station_df = samples_with_station_df.rename(columns={
     "Fecha": "date",
     "Tipus": "is_rockfall",
     "Municipio": "municipality",
-    "Vertiente": "slope",
+    "Vertiente": "hillside",
     "DURESA": "hardness"
 })
 samples_with_station_df["date"] = pd.to_datetime(samples_with_station_df["date"])
@@ -97,6 +101,8 @@ samples_with_station_df.loc[
     (samples_with_station_df["municipality"] == "Esporles")
     & (samples_with_station_df["date"] == "2026-01-21"), "code"] = "BAR04"
 
+samples_with_station_df['hardness'] = samples_with_station_df['hardness'].replace({'Moderately': 'Moderately hard rocks'})
+
 # Guardamos el resultado listo para tu modelo
 samples_with_station_df.to_csv(RESULTS_PATH / 'samples_with_stations.csv', index=False)
 
@@ -105,10 +111,68 @@ aemet_df = format_aemet_data(aemet_df)
 
 aemet_df.to_csv(RESULTS_PATH / "formatted_historical_aemet_data.csv", index=False)
 
+percentiles = aemet_df.groupby('code')['precipitation'].quantile(0.95)
+
+# Get high-precipitation days (>= station percentile) between 2005 and 2015
+aemet_df_filtered = aemet_df[
+    (aemet_df["date"] >= "2005-01-01") & (aemet_df["date"] <= "2015-12-31")
+].copy()
+
+high_precipitation_days = aemet_df_filtered[
+    aemet_df_filtered["precipitation"] >= aemet_df_filtered["code"].map(percentiles)
+]
+
+high_precipitation_days_by_station = (
+    high_precipitation_days.groupby("code")["date"].apply(lambda dates: dates.tolist()).to_dict()
+)
+
+# Replace the date for 40% of is_rockfall == 'F' samples with a random
+# high-precipitation day belonging to the same station code.
+rng = np.random.default_rng(42)
+f_mask = samples_with_station_df["is_rockfall"] == "F"
+f_indices = samples_with_station_df.loc[f_mask].index
+n_replace = int(len(f_indices) * 0.4)
+replace_indices = rng.choice(f_indices, size=n_replace, replace=False)
+
+for idx in replace_indices:
+    station_code = samples_with_station_df.at[idx, "code"]
+    available_dates = high_precipitation_days_by_station.get(station_code, [])
+    if available_dates:
+        samples_with_station_df.at[idx, "date"] = rng.choice(available_dates)
+
 samples_with_station_df["last_day_acc"] = 0.0
 samples_with_station_df["last_week_acc"] = 0.0
 samples_with_station_df["last_month_acc"] = 0.0
 samples_with_station_df["last_three_months_acc"] = 0.0
 final_df = samples_with_station_df.apply(lambda row: get_prec_accumulations_by_date(row, aemet_df), axis=1)
-final_df = final_df.rename(columns={"code": "station_code"})
 final_df.to_csv(RESULTS_PATH / "samples_with_accumulations.csv", index=False)
+
+susceptibility_df = gpd.read_file(DATA_PATH / "susceptibility" / "vectorial_gravitacionals_INES.shp")
+final_gdf = gpd.GeoDataFrame(
+    final_df,
+    geometry=gpd.points_from_xy(final_df['POINT_X'], final_df['POINT_Y']),
+    crs="EPSG:32631"
+)
+
+susceptibility_df = susceptibility_df.to_crs(final_gdf.crs)
+
+final_gdf = gpd.sjoin(
+    left_df=final_gdf,
+    right_df=susceptibility_df,
+    how="left",
+    predicate="within"
+)
+
+final_gdf = final_gdf.drop(columns=["index_right", "geometry", "fid", "Value", "code"])
+final_gdf = final_gdf.rename(columns={"POTENCIALI": "susceptibility"})
+final_gdf.to_csv(RESULTS_PATH / "samples_with_susceptibility.csv", index=False)
+
+final_gdf['is_rockfall'] = final_gdf['is_rockfall'].map({"T": 1, "F": 0})
+
+dataframe_analysis(final_gdf)
+
+columns_with_slope = list(final_gdf.columns[final_gdf.columns.str.contains("slope")])
+columns_with_elevation = list(final_gdf.columns[final_gdf.columns.str.contains("elev")])
+
+final_gdf = final_gdf.drop(columns=columns_with_slope + columns_with_elevation)
+final_gdf.to_csv(RESULTS_PATH / "final_gdf.csv", index=False)
