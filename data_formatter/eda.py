@@ -5,7 +5,7 @@ from matplotlib import pyplot as plt
 
 
 def dataframe_analysis(df: pd.DataFrame):
-    precip_cols = ['last_day_acc', 'last_week_acc', 'last_month_acc', 'last_three_months_acc']
+    precip_cols = ['event_day_acc', 'last_week_acc', 'last_month_acc', 'last_three_months_acc']
     slope_cols = [c for c in df.columns if c.startswith('slope_')]
     elev_cols = [c for c in df.columns if c.startswith('elev_')]
 

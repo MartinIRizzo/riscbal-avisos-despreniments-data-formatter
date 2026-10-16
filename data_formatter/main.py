@@ -7,7 +7,7 @@ import geopandas as gpd
 import seaborn as sns
 from dotenv import load_dotenv
 
-from aemet_formatter import format_aemet_data
+from data_formatter.aemet_formatter import format_aemet_data
 from data_formatter.eda import dataframe_analysis
 from data_formatter.prec_accumulation import get_prec_accumulations_by_date
 
@@ -140,7 +140,7 @@ for idx in replace_indices:
     if available_dates:
         samples_with_station_df.at[idx, "date"] = rng.choice(available_dates)
 
-samples_with_station_df["last_day_acc"] = 0.0
+samples_with_station_df["event_day_acc"] = 0.0
 samples_with_station_df["last_week_acc"] = 0.0
 samples_with_station_df["last_month_acc"] = 0.0
 samples_with_station_df["last_three_months_acc"] = 0.0

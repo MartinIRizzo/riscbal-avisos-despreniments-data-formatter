@@ -9,15 +9,33 @@ RISCBAL_STATIONS = [
     "GRO08"
 ]
 
+# AEMET daily precipitation is measured over the "pluviometric day": from
+# 07:00 UTC on day D to 07:00 UTC on day D+1, and it is labelled with day D.
+# RiscBal stations store 10-minute records, so their windows are shifted by
+# the same 7 hours to measure the same "day" as AEMET.
+PLUVIOMETRIC_DAY_OFFSET = pd.Timedelta(hours=7)
+
+
 def get_prec_accumulations_by_date(row, aemet_df: pd.DataFrame) -> pd.DataFrame:
     station_code = row["code"]
+    # Only the date of the event is known (no time). Normalising to midnight
+    # guarantees that the windows below select whole AEMET days, even if a
+    # date was ever stored with a time.
+    event_day = row["date"].normalize()
+    next_day = event_day + pd.Timedelta(days=1)
 
-    last_day_acc = round(_compute_accumulation(station_code, row["date"] - pd.Timedelta(days=1), row["date"], aemet_df), 1)
-    last_week_acc = round(_compute_accumulation(station_code, row["date"] - pd.Timedelta(days=7), row["date"], aemet_df), 1)
-    last_month_acc = round(_compute_accumulation(station_code, row["date"] - pd.Timedelta(days=30), row["date"], aemet_df), 1)
-    last_three_months_acc = round(_compute_accumulation(station_code, row["date"] - pd.Timedelta(days=90), row["date"], aemet_df), 1)
+    # Event-day rain: the triggering rain, which is what the official
+    # 90 mm / 24 h threshold refers to. Caveat: with daily data it may include
+    # rain that fell after the rockfall (operationally, that day's rain would
+    # come from a forecast).
+    event_day_acc = round(_compute_accumulation(station_code, event_day, next_day, aemet_df), 1)
 
-    row["last_day_acc"] = last_day_acc
+    # Antecedent rain: the days *before* the event, excluding the event day.
+    last_week_acc = round(_compute_accumulation(station_code, event_day - pd.Timedelta(days=7), event_day, aemet_df), 1)
+    last_month_acc = round(_compute_accumulation(station_code, event_day - pd.Timedelta(days=30), event_day, aemet_df), 1)
+    last_three_months_acc = round(_compute_accumulation(station_code, event_day - pd.Timedelta(days=90), event_day, aemet_df), 1)
+
+    row["event_day_acc"] = event_day_acc
     row["last_week_acc"] = last_week_acc
     row["last_month_acc"] = last_month_acc
     row["last_three_months_acc"] = last_three_months_acc
@@ -27,6 +45,12 @@ def get_prec_accumulations_by_date(row, aemet_df: pd.DataFrame) -> pd.DataFrame:
 def _compute_accumulation(
     station_code: str, start_date: datetime, end_date: datetime, aemet_df: pd.DataFrame
 ):
+    """Rain from start_date (inclusive) to end_date (exclusive), in days.
+
+    Missing data counts as 0 in both branches: AEMET days absent from the
+    file are simply not summed, and the database returns no rows. This is a
+    known limitation (see TODO: formatter refactor).
+    """
     if station_code in RISCBAL_STATIONS:
         return _get_riscbal_precipitation_acc(station_code, start_date, end_date)
 
@@ -42,6 +66,10 @@ def _get_riscbal_precipitation_acc(
     start_date: pd.Timestamp,
     end_date: pd.Timestamp
 ) -> float:
+    # Same pluviometric days as AEMET: day D runs 07:00 UTC D -> 07:00 UTC D+1.
+    start = (start_date + PLUVIOMETRIC_DAY_OFFSET).to_pydatetime().replace(tzinfo=timezone.utc)
+    end = (end_date + PLUVIOMETRIC_DAY_OFFSET).to_pydatetime().replace(tzinfo=timezone.utc)
+
     with psycopg.connect(
         f"dbname={os.getenv('DATABASE_NAME')} "
         f"user={os.getenv('DATABASE_USER')} "
@@ -66,10 +94,12 @@ def _get_riscbal_precipitation_acc(
                         AND d.logger_timestamp < %s
                         AND d.quality = '0'
                 """,
-                (station_code,
-                 start_date.to_pydatetime().replace(tzinfo=timezone.utc),
-                 end_date.to_pydatetime().replace(tzinfo=timezone.utc))
+                (station_code, start, end)
             )
 
             result = cur.fetchone()
-            return result[0] if result else 0
+            # SUM over no rows is NULL (None). Treat it as 0, like the AEMET
+            # branch, instead of crashing later in round(None).
+            if result is None or result[0] is None:
+                return 0.0
+            return float(result[0])
