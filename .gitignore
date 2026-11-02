@@ -10,7 +10,10 @@ wheels/
 .venv
 
 results/
+runs/
 data/
 .env
 
 .idea
+# AEMET API downloads shared by the scripts (not run-specific)
+cache/

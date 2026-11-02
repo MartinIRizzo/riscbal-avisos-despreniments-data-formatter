@@ -1,142 +1,182 @@
+"""Reshape the AEMET daily precipitation file into one row per gauge and day.
+
+The raw file (``data/historical_aemet_data.csv``) has one row per gauge and
+month, with the daily values in columns P1..P31, in tenths of mm. Two special
+codes appear:
+
+- ``-3``: trace (rain below 0.1 mm), read as 0 mm;
+- ``-4``: accumulated. A run of ``-4`` days is closed by the first positive
+  value after it, which holds the total of the whole run (the ``-4`` days plus
+  the closing day). Some manual gauges are read once a month: ``-4`` on every
+  day but the last.
+
+The ``-4`` totals are spread evenly over the days of their run, which keeps
+the totals right but not their timing. Those days are flagged in the
+``accumulated`` column, so later steps can tell a real daily reading from a
+spread one (see the vault note "Accumulated -4 readings").
+"""
+
 import numpy as np
 import pandas as pd
 
+TRACE_CODE = -3
+ACCUMULATED_CODE = -4
+TENTHS_PER_MM = 10.0
+MINUTES_PER_DEGREE = 60
+SECONDS_PER_DEGREE = 3600
+# Decimals of the spread share, in tenths of mm (as in the original code).
+SHARE_DECIMALS = 1
+DAY_COLUMNS = [f"P{day}" for day in range(1, 32)]
 
-def _dms_to_decimal(dms_str: str) -> float:
-    """Convert an AEMET DMS coordinate string to decimal degrees.
 
-    AEMET encodes coordinates as DDMMSS (latitude) or DDDMMSS (longitude).
-    For Balearic longitudes, a trailing '1' indicates East and must be stripped
-    before parsing.
+def _dms_to_decimal(dms_text: str) -> float:
+    """Convert an AEMET DMS coordinate to decimal degrees.
+
+    Parameters
+    ----------
+    dms_text : str
+        DDMMSS (latitude) or DDDMMSS (longitude). The trailing East
+        indicator of Balearic longitudes must be stripped before.
+
+    Returns
+    -------
+    float
+        Decimal degrees.
     """
-    degrees = int(dms_str[:-4])
-    minutes = int(dms_str[-4:-2])
-    seconds = int(dms_str[-2:])
-    return degrees + minutes / 60 + seconds / 3600
+    degrees = int(dms_text[:-4])
+    minutes = int(dms_text[-4:-2])
+    seconds = int(dms_text[-2:])
+    return (
+        degrees + minutes / MINUTES_PER_DEGREE + seconds / SECONDS_PER_DEGREE
+    )
 
 
-def _distribute_minus4(values: list) -> list:
-    """Distribute accumulated rainfall (-4 codes) in a daily series.
+def _spread_accumulated(
+    values: list[float],
+) -> tuple[list[float], list[bool]]:
+    """Spread the ``-4`` totals of one month over the days of their run.
 
-    When a positive value follows a run of -4 entries, that positive value
-    represents the total rainfall for the run plus the day itself. The total
-    is divided equally among all those days.
-    Values that are NaN are left as-is.
+    A run is a sequence of ``-4`` days closed by the first positive value
+    after it. That value is the total of the run plus the closing day, so it
+    is divided equally among all those days. A run that reaches the end of
+    the month without a closing value can't be spread: its days become NaN
+    (unknown). NaN values are left as they are.
+
+    Parameters
+    ----------
+    values : list of float
+        The month's daily values (P1..P31), in tenths of mm, with ``-4``
+        codes and NaN for empty days.
+
+    Returns
+    -------
+    spread : list of float
+        The values with every closed run replaced by its share.
+    accumulated : list of bool
+        For each day, whether it belongs to a run (the ``-4`` days and the
+        closing day).
     """
-    result = values.copy()
+    spread = values.copy()
+    accumulated = [False] * len(values)
     run_start = None
-    for i, v in enumerate(result):
-        if np.isnan(v):
+    for position, value in enumerate(spread):
+        if np.isnan(value):
             continue
-        if v == -4:
+        if value == ACCUMULATED_CODE:
             if run_start is None:
-                run_start = i
-        else:
-            if run_start is not None:
-                n_days = i - run_start + 1
-                share = round(v / n_days, 1)
-                for j in range(run_start, i + 1):
-                    result[j] = share
-                run_start = None
-    # If a run of -4 reaches the end without a closing positive value,
-    # we cannot distribute — set them to NaN (unknown).
+                run_start = position
+        elif run_start is not None:
+            n_days = position - run_start + 1
+            share = round(value / n_days, SHARE_DECIMALS)
+            for day in range(run_start, position + 1):
+                spread[day] = share
+                accumulated[day] = True
+            run_start = None
     if run_start is not None:
-        for j in range(run_start, len(result)):
-            if result[j] == -4:
-                result[j] = np.nan
-    return result
+        for day in range(run_start, len(spread)):
+            if spread[day] == ACCUMULATED_CODE:
+                spread[day] = np.nan
+                accumulated[day] = True
+    return spread, accumulated
 
 
-def format_aemet_data(df: pd.DataFrame) -> pd.DataFrame:
-    """Format raw AEMET precipitation data into a daily DataFrame.
+def format_aemet_data(raw_aemet: pd.DataFrame) -> pd.DataFrame:
+    """Reshape the raw AEMET file into one row per gauge and day.
 
-    Transformations applied:
-    - Coordinates converted from AEMET DMS to decimal degrees.
-      Longitude trailing '1' (East indicator for Balearics) is stripped.
-    - Precipitation columns (P1..P31) are melted into one row per day.
-    - Special code -3 (trace/inapreciable) is replaced with 0.
-    - Special code -4 (accumulated) is distributed: the first positive value
-      after a run of -4s is split evenly across all those days.
-    - Values are converted from tenths of mm to mm.
+    Parameters
+    ----------
+    raw_aemet : pandas.DataFrame
+        The raw AEMET file: one row per gauge (``INDICATIVO``) and month
+        (``AÑO``, ``MES``), daily values in tenths of mm in ``P1``..``P31``,
+        DMS coordinates in ``LONGITUD`` and ``LATITUD``.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per gauge and day with a value, sorted by gauge and date.
+        Columns: ``code``, ``date``, ``precipitation`` (mm), ``accumulated``
+        (the day belongs to a ``-4`` run, so its value is a spread share of
+        a multi-day total), ``lon`` and ``lat`` (decimal degrees), plus the
+        other columns of the raw file (``NOMBRE``, ``ALTITUD``). Days without
+        a value, and dates that don't exist (e.g. 30 February), have no row.
     """
-    df = df.copy()
+    monthly = raw_aemet.copy()
 
-    # --- Coordinates ---
-    df["LONGITUD"] = df["LONGITUD"].astype(str).str.strip()
-    df["LATITUD"] = df["LATITUD"].astype(str).str.strip()
-    # Strip trailing '1' (East indicator) from Balearic longitudes
-    df["LONGITUD"] = df["LONGITUD"].str[:-1]
-    df["LONGITUD"] = df["LONGITUD"].apply(_dms_to_decimal)
-    df["LATITUD"] = df["LATITUD"].apply(_dms_to_decimal)
+    # Coordinates: strip the trailing '1' (East) of Balearic longitudes.
+    monthly["LONGITUD"] = monthly["LONGITUD"].astype(str).str.strip()
+    monthly["LATITUD"] = monthly["LATITUD"].astype(str).str.strip()
+    monthly["LONGITUD"] = monthly["LONGITUD"].str[:-1]
+    monthly["LONGITUD"] = monthly["LONGITUD"].apply(_dms_to_decimal)
+    monthly["LATITUD"] = monthly["LATITUD"].apply(_dms_to_decimal)
 
-    # --- Identify precipitation columns ---
-    p_cols = [f"P{d}" for d in range(1, 32)]
+    # Empty strings and blanks become NaN.
+    for column in DAY_COLUMNS:
+        monthly[column] = pd.to_numeric(monthly[column], errors="coerce")
+        monthly[column] = monthly[column].replace(TRACE_CODE, 0)
 
-    # Coerce precipitation columns to numeric (empty strings / blanks → NaN)
-    for col in p_cols:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    # --- Handle -3 (trace rain → 0) ---
-    for col in p_cols:
-        df[col] = df[col].replace(-3, 0)
-
-    # --- Handle -4 (accumulated rainfall distribution) ---
-    minus4_mask = (df[p_cols] == -4).any(axis=1)
-    if minus4_mask.any():
-        df.loc[minus4_mask, p_cols] = (
-            df.loc[minus4_mask, p_cols]
-            .apply(
-                lambda row: pd.Series(
-                    _distribute_minus4(row.tolist()), index=p_cols
-                ),
-                axis=1,
-            )
+    flags = pd.DataFrame(False, index=monthly.index, columns=DAY_COLUMNS)
+    has_accumulated = (monthly[DAY_COLUMNS] == ACCUMULATED_CODE).any(axis=1)
+    for index in monthly.index[has_accumulated]:
+        spread, accumulated = _spread_accumulated(
+            monthly.loc[index, DAY_COLUMNS].tolist()
         )
+        monthly.loc[index, DAY_COLUMNS] = spread
+        flags.loc[index, DAY_COLUMNS] = accumulated
 
-    # --- Convert tenths of mm to mm ---
-    for col in p_cols:
-        df[col] = df[col] / 10.0
+    for column in DAY_COLUMNS:
+        monthly[column] = monthly[column] / TENTHS_PER_MM
 
-    # --- Melt to one row per day ---
-    id_cols = [c for c in df.columns if c not in p_cols]
-    df_melted = df.melt(
-        id_vars=id_cols,
-        value_vars=p_cols,
+    # One row per day. The flags are melted in the same order, so their
+    # rows line up with the values before anything is filtered.
+    id_columns = [c for c in monthly.columns if c not in DAY_COLUMNS]
+    daily = monthly.melt(
+        id_vars=id_columns,
+        value_vars=DAY_COLUMNS,
         var_name="DIA_COL",
         value_name="PRECIPITACION",
     )
-    # Extract day number from column name (P1 → 1, P31 → 31)
-    df_melted["DIA"] = df_melted["DIA_COL"].str.replace("P", "").astype(int)
-    df_melted.drop(columns=["DIA_COL"], inplace=True)
+    daily["accumulated"] = flags.melt(value_vars=DAY_COLUMNS)[
+        "value"
+    ].to_numpy()
+    daily["DIA"] = daily["DIA_COL"].str.replace("P", "").astype(int)
+    daily = daily.drop(columns=["DIA_COL"])
 
-    # Build date column, dropping invalid dates (e.g. Feb 30)
-    df_melted["FECHA"] = pd.to_datetime(
-        {
-            "year": df_melted["AÑO"],
-            "month": df_melted["MES"],
-            "day": df_melted["DIA"],
-        },
+    # Dates that don't exist (e.g. 30 February) are dropped.
+    daily["FECHA"] = pd.to_datetime(
+        {"year": daily["AÑO"], "month": daily["MES"], "day": daily["DIA"]},
         errors="coerce",
     )
-    df_melted = df_melted.dropna(subset=["FECHA"])
+    daily = daily.dropna(subset=["FECHA"])
+    daily = daily.drop(columns=["AÑO", "MES", "DIA"])
+    daily = daily.dropna(subset=["PRECIPITACION"])
 
-    # Drop intermediate date-part columns now that FECHA is built
-    df_melted.drop(columns=["AÑO", "MES", "DIA"], inplace=True)
-
-    # Drop rows where precipitation is NaN (missing / empty in original)
-    df_melted = df_melted.dropna(subset=["PRECIPITACION"])
-
-    # Sort and reset index
-    df_melted = df_melted.sort_values(
-        ["INDICATIVO", "FECHA"]
-    ).reset_index(drop=True)
-
-    df_melted = df_melted.rename(columns={
-        "INDICATIVO": "code",
-        "FECHA": "date",
-        "PRECIPITACION": "precipitation",
-        "LONGITUD": "lon",
-        "LATITUD": "lat",
-    })
-
-    return df_melted
+    daily = daily.sort_values(["INDICATIVO", "FECHA"]).reset_index(drop=True)
+    return daily.rename(
+        columns={
+            "INDICATIVO": "code",
+            "FECHA": "date",
+            "PRECIPITACION": "precipitation",
+            "LONGITUD": "lon",
+            "LATITUD": "lat",
+        }
+    )

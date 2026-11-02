@@ -1,0 +1,65 @@
+# Settings of a formatter run (read by data_formatter/config.py).
+#
+# Everything that changes how the dataset is built lives here. The optional
+# steps (negative_shift, temporal_controls, fallback) are switched on and off
+# with the `enabled` field of their own section. Each run records these
+# values, and a copy of this file, in runs/<run_id>/, so an export can always
+# be traced back to the settings that made it.
+# Run with another file: python -m data_formatter.main --config other.yaml
+
+# Paths, relative to the repo root (where the formatter is run from). Every
+# run writes all its outputs (final_gdf.csv and the intermediate files) to
+# <runs>/<run_id>/outputs/; nothing is written anywhere else.
+paths:
+  data: data
+  runs: runs
+
+gauges:
+  # Read from the RiscBal database (10-minute records), not the AEMET file.
+  riscbal_stations: [BAR04, GRO08]
+  # AEMET's pluviometric day runs 07:00 UTC on day D to 07:00 UTC on D+1 and
+  # is labelled D. RiscBal windows are shifted by the same hours.
+  pluviometric_day_offset_hours: 7
+  # Esporles samples dated in (after, until] use a RiscBal gauge instead of
+  # their AEMET station: the gauges' record periods (AEMET data ends in 2022).
+  reassignments:
+    - {municipality: Esporles, after: "2024-03-25", until: "2025-03-25", gauge: GRO08}
+    - {municipality: Esporles, after: "2026-01-20", until: "2026-01-21", gauge: BAR04}
+
+# Original negative sampling: move `share` of the random points to a random
+# day with rain >= the station's `percentile`, within `period`.
+negative_shift:
+  # Phase B0 (2026-10-17): OFF. Moving negatives to high-rainfall days made
+  # every model learn "more rain -> less risk" (vault: D-008).
+  enabled: false
+  share: 0.4
+  percentile: 0.95
+  period: ["2005-01-01", "2015-12-31"]
+  seed: 42
+
+# Temporal controls (see data_formatter/controls.py for the rules). Only
+# rockfalls at AEMET gauges get controls; the RiscBal gauges get none for now
+# (duplicated 10-minute records).
+temporal_controls:
+  # Phase B1: non-rockfall days at each rockfall's site (vault: D-009).
+  enabled: true
+  per_rockfall: 10
+  # No control within this many days of any rockfall at the same gauge.
+  exclusion_days: 7
+  # Share of the 90 antecedent days that must be measured.
+  min_coverage: 0.9
+  # The rockfalls' period.
+  period: ["2005-01-01", "2015-12-31"]
+  seed: 42
+
+# Fallback gauge (see data_formatter/gauge_fallback.py): if a sample's own
+# gauge didn't measure its window, the nearest stations.csv gauge that did.
+# Distance is straight-line for now (stand-in for the slope-weighted one).
+fallback:
+  # Under-measured samples read rain from another gauge (vault: D-012).
+  enabled: true
+  # Same threshold as the temporal controls.
+  min_coverage: 0.9
+  require_event_day: true
+  # Rain in the Tramuntana changes over a few km: no gauge further away.
+  max_distance_km: 5.0
