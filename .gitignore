@@ -17,3 +17,5 @@ data/
 .idea
 # AEMET API downloads shared by the scripts (not run-specific)
 cache/
+
+.vscode/
