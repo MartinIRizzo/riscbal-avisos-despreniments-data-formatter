@@ -18,7 +18,8 @@ order (each writes its intermediate file to the run's outputs folder,
 2. reshaped AEMET daily rain          data_loading.py      formatted_historical_aemet_data.csv
 3. negative shift (flag)              negative_shift.py    shifted_negatives.csv
 4. temporal controls (flag)           controls.py          temporal_controls_summary.csv
-5. fallback gauges (flag)             gauge_fallback.py    gauge_fallback.csv
+5. replacement gauges (flag)          gauge_fallback.py    gauge_fallback.csv,
+                                                           exclusions.csv
 6. rain windows                       prec_accumulation.py samples_with_accumulations.csv
 7. susceptibility                     susceptibility.py    samples_with_susceptibility.csv
 8. export                             export.py            final_gdf.csv
@@ -41,7 +42,7 @@ from data_formatter.controls import (
 )
 from data_formatter.data_loading import load_aemet, load_samples, load_stations
 from data_formatter.export import export_dataset
-from data_formatter.gauge_fallback import use_fallback_gauges
+from data_formatter.gauge_fallback import no_exclusions, use_fallback_gauges
 from data_formatter.negative_shift import SHIFTED_COLUMNS, shift_negatives
 from data_formatter.prec_accumulation import add_rain
 from data_formatter.run_record import (
@@ -123,7 +124,8 @@ def main() -> None:
     else:
         logger.info("Negative shift: off")
 
-    # Days each AEMET gauge measured (candidate control days, rain_days_90d).
+    # Days each AEMET gauge measured, real readings only (-4 runs are not):
+    # candidate control days, coverage, rain_days_90d.
     days_by_gauge = measured_days(dict(tuple(aemet.groupby("code"))))
 
     samples = with_own_source_ids(samples)
@@ -145,15 +147,18 @@ def main() -> None:
 
     fallback_report = pd.DataFrame()
     if config.fallback.enabled:
-        samples, fallback_report = use_fallback_gauges(
+        # Also drops the excluded samples and their controls (D-021, D-023).
+        samples, fallback_report, exclusions = use_fallback_gauges(
             samples,
             stations,
+            aemet,
             days_by_gauge,
             config.fallback,
             outputs,
         )
     else:
-        logger.info("Fallback gauges: off")
+        logger.info("Fallback gauges: off (nothing excluded)")
+        exclusions = no_exclusions(outputs)
 
     samples = add_rain(
         samples,
@@ -168,7 +173,7 @@ def main() -> None:
 
     settings = settings_record(config)
     summary = run_summary(
-        final, shifted, control_summary, fallback_report, config
+        final, shifted, control_summary, fallback_report, exclusions, config
     )
     write_formatter_config(run.run_id, settings, summary, config, outputs)
     n_by_sample_type = summary["n_by_sample_type"]

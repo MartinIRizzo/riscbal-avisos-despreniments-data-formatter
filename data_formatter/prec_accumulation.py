@@ -7,6 +7,13 @@ RiscBal database.
 Missing days count as 0 mm: AEMET days absent from the file are simply not
 summed, and the database returns no rows. ``rain_days_90d`` (controls.py)
 shows how many days were really measured.
+
+Days of a -4 (accumulated) run add their even share of the run's total
+(aemet_formatter.py): the total of a 7-90-day window stays right, only its
+day-by-day timing is lost (user's choice, 2026-11-03). They don't count as
+measured, though, so a window with many of them gets a replacement gauge or
+is excluded (gauge_fallback.py). With ``fallback.require_event_day`` (the
+default), the event day of every AEMET sample is a real reading.
 """
 
 import os

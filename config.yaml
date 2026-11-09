@@ -52,14 +52,27 @@ temporal_controls:
   period: ["2005-01-01", "2015-12-31"]
   seed: 42
 
-# Fallback gauge (see data_formatter/gauge_fallback.py): if a sample's own
-# gauge didn't measure its window, the nearest stations.csv gauge that did.
-# Distance is straight-line for now (stand-in for the slope-weighted one).
+# Replacement gauge (see data_formatter/gauge_fallback.py): if a sample's
+# own gauge didn't measure its window, a twin of it or the nearest
+# stations.csv gauge that did, if their daily rain agrees; otherwise the
+# sample is excluded (and reported in exclusions.csv). Days of -4 runs are
+# not measured (vault: D-015). Distance is straight-line for now (stand-in
+# for the slope-weighted one).
 fallback:
-  # Under-measured samples read rain from another gauge (vault: D-012).
+  # Under-measured samples read rain from another gauge or are excluded
+  # (vault: D-012, D-021). Off: every sample keeps its own gauge.
   enabled: true
-  # Same threshold as the temporal controls.
+  # Same threshold as the temporal controls (real readings only).
   min_coverage: 0.9
   require_event_day: true
   # Rain in the Tramuntana changes over a few km: no gauge further away.
   max_distance_km: 5.0
+  # A twin (same code +/- a suffix, e.g. B158 / B158X) must be this close
+  # to the own gauge, unless r > min_r (vault: D-021).
+  twin_max_distance_km: 1.0
+  # Pearson r of the daily rain of the two gauges, on their common real
+  # readings in correlation_period: at least min_common_days of them
+  # (95% interval of r ~0.88-0.92 around 0.90 with 365 days).
+  min_r: 0.9
+  min_common_days: 365
+  correlation_period: ["2005-01-01", "2015-12-31"]

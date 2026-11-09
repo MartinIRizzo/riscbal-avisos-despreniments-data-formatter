@@ -91,7 +91,7 @@ class Config:
     controls : ControlSettings
         Temporal controls.
     fallback : FallbackSettings
-        Fallback gauges.
+        Replacement gauges and exclusions.
     """
 
     data_path: Path
@@ -122,6 +122,7 @@ class Config:
         gauges = raw["gauges"]
         shift = raw["negative_shift"]
         controls = raw["temporal_controls"]
+        fallback = raw["fallback"]
         return cls(
             data_path=Path(raw["paths"]["data"]),
             runs_path=Path(raw["paths"]["runs"]),
@@ -138,5 +139,12 @@ class Config:
             controls=ControlSettings(
                 **{**controls, "period": tuple(controls["period"])}
             ),
-            fallback=FallbackSettings(**raw["fallback"]),
+            fallback=FallbackSettings(
+                **{
+                    **fallback,
+                    "correlation_period": tuple(
+                        fallback["correlation_period"]
+                    ),
+                }
+            ),
         )

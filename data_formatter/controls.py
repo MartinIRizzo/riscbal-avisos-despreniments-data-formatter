@@ -21,7 +21,8 @@ RiscBal gauges (BAR04, GRO08) get none for now (TODO: their 10-minute
 records have duplicated timestamps to sort out first).
 
 A candidate day D for a rockfall must:
-  1. be a day the gauge measured (it has an AEMET value), within `period`;
+  1. be a day the gauge measured (a real daily reading, not part of a -4
+     run; see `measured_days`), within `period`;
   2. have at least `min_coverage` of the 90 days before it measured, so the
      antecedent windows aren't "missing counted as 0 mm";
   3. be more than `exclusion_days` away from every recorded rockfall at the
@@ -31,6 +32,7 @@ A candidate day D for a rockfall must:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,6 +43,8 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 ANTECEDENT_DAYS = 90  # the longest rain window (last_three_months_acc)
+# Bytes of a sample id's SHA-256 used in its seed (64 bits).
+SEED_BYTES = 8
 
 
 @dataclass(frozen=True)
@@ -62,7 +66,8 @@ class ControlSettings:
         First and last day (ISO dates) the controls are drawn from: the
         rockfalls' period.
     seed : int
-        Seed of the random generator.
+        Global seed; each rockfall's generator is seeded from it and the
+        rockfall's ``sample_id`` (see ``rockfall_rng``).
     """
 
     enabled: bool
@@ -76,23 +81,33 @@ class ControlSettings:
 def measured_days(
     aemet_by_station: dict[str, pd.DataFrame],
 ) -> dict[str, pd.DatetimeIndex]:
-    """Days each AEMET gauge measured.
+    """Days each AEMET gauge measured: its real daily readings.
 
     The formatted AEMET table has one row per station and day with a value;
-    a missing day has no row.
+    a missing day has no row. Days of a -4 run (``accumulated``: the -4 days
+    and the day that closes the run) are left out too: their value is an
+    even share of a multi-day total, so the day's own rain is unknown (vault
+    D-015). They still add their share to the rain windows
+    (prec_accumulation.py); here they only stop counting as measured, so
+    they count against coverage and can trigger a replacement gauge.
 
     Parameters
     ----------
     aemet_by_station : dict of str to pandas.DataFrame
-        The formatted AEMET table split by gauge code.
+        The formatted AEMET table split by gauge code, with ``date`` and
+        ``accumulated``.
 
     Returns
     -------
     dict of str to pandas.DatetimeIndex
-        For each gauge code, the sorted unique days with a value.
+        For each gauge code, the sorted unique days with a real reading
+        (empty if the gauge only has -4 runs).
     """
     return {
-        code: pd.DatetimeIndex(df["date"]).normalize().unique().sort_values()
+        code: pd.DatetimeIndex(df.loc[~df["accumulated"], "date"])
+        .normalize()
+        .unique()
+        .sort_values()
         for code, df in aemet_by_station.items()
     }
 
@@ -188,6 +203,34 @@ def candidate_days(
     return candidates
 
 
+def rockfall_rng(seed: int, sample_id: str) -> np.random.Generator:
+    """The random generator of one rockfall's controls (vault D-022).
+
+    NumPy turns a list of integers into one seed (``SeedSequence``), and
+    different lists give independent streams. So each rockfall draws from
+    its own stream: a change to one rockfall's candidate days no longer
+    shifts the draws of every rockfall after it, as one shared generator
+    did. The id is hashed with SHA-256 because Python's ``hash()`` of a
+    string changes from one run to the next.
+
+    Parameters
+    ----------
+    seed : int
+        The global seed (``temporal_controls.seed``).
+    sample_id : str
+        The rockfall's ``sample_id``.
+
+    Returns
+    -------
+    numpy.random.Generator
+        The same generator for the same seed and id, on any machine.
+    """
+    digest = hashlib.sha256(sample_id.encode("utf-8")).digest()
+    return np.random.default_rng(
+        [seed, int.from_bytes(digest[:SEED_BYTES], "big")]
+    )
+
+
 def draw_temporal_controls(
     samples: pd.DataFrame,
     days_by_gauge: dict[str, pd.DatetimeIndex],
@@ -199,9 +242,9 @@ def draw_temporal_controls(
     Each control copies every column of its rockfall, then sets ``date``,
     ``is_rockfall`` = F, ``sample_type`` = temporal_control,
     ``source_sample_id`` and its own ``sample_id``
-    (``<rockfall id>_c<nn>``). Rockfalls are processed in ``sample_id``
-    order with one generator, so the draws are reproducible for a fixed
-    seed and input.
+    (``<rockfall id>_c<nn>``). Each rockfall has its own generator
+    (``rockfall_rng``), so its draws depend only on the seed, its id and
+    its candidate days.
 
     Parameters
     ----------
@@ -224,7 +267,6 @@ def draw_temporal_controls(
         One row per rockfall: ``sample_id``, ``code``, ``date``,
         ``n_candidates`` and ``n_controls``.
     """
-    rng = np.random.default_rng(settings.seed)
     rockfalls = samples[samples["sample_type"] == "rockfall"].sort_values(
         "sample_id"
     )
@@ -251,6 +293,7 @@ def draw_temporal_controls(
             settings,
         )
         n = min(settings.per_rockfall, len(candidates))
+        rng = rockfall_rng(settings.seed, rockfall["sample_id"])
         chosen = (
             np.sort(rng.choice(candidates.to_numpy(), size=n, replace=False))
             if n
@@ -292,8 +335,9 @@ def rain_days_90d(
 ) -> pd.Series:
     """Measured days in each sample's 90-day antecedent window.
 
-    Metadata, not a feature: a low value means the antecedent sums are partly
-    "missing counted as 0 mm" (e.g. the rows with 0 mm in every window).
+    Metadata, not a feature. Counts real daily readings only (days of -4
+    runs are not counted; see ``measured_days``). Missing days count as
+    0 mm in the sums, and -4 days add their spread share.
 
     Parameters
     ----------

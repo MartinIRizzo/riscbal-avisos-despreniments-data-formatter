@@ -59,7 +59,7 @@ import pandas as pd
 
 from data_formatter import inventory
 from data_formatter.config import Config
-from data_formatter.gauge_fallback import REASSIGNED
+from data_formatter.gauge_fallback import NEAREST, TWIN
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 RUNS_DIR = PROJECT_ROOT / "runs"
@@ -427,9 +427,12 @@ def settings_record(config: Config) -> dict[str, object]:
             "riscbal_gauges": list(config.riscbal_stations),
             "temporal_controls_at_riscbal_gauges": False,
             "fallback": {
-                "rule": "own gauge if it covers the window, else nearest stations.csv gauge that does",
+                "rule": "own gauge if it covers the window; else a twin (same code +/- suffix) or the nearest stations.csv gauge within max_distance_km that covers it, with r >= min_r on >= min_common_days common real days; else excluded (exclusions.csv), with the controls of an excluded rockfall (vault D-021, D-023)",
                 "distance": "straight-line (stand-in for slope-weighted cost distance)",
-                **vars(config.fallback),
+                **{
+                    key: list(value) if isinstance(value, tuple) else value
+                    for key, value in vars(config.fallback).items()
+                },
             },
         },
         "rain": {
@@ -438,7 +441,8 @@ def settings_record(config: Config) -> dict[str, object]:
                 config.pluviometric_day_offset.total_seconds()
                 / SECONDS_PER_HOUR
             ),
-            "missing_days": "counted as 0 mm (see rain_days_90d); under-measured samples use a fallback gauge (gauges.fallback)",
+            "missing_days": "counted as 0 mm (see rain_days_90d); under-measured samples use a replacement gauge or are excluded (gauges.fallback)",
+            "accumulated_days": "-4 runs (the -4 days and the closing day) are not measured: they count against coverage and never count as a real reading (vault D-015); the sums keep their spread share",
         },
         "negative_shift": {
             **asdict(config.negative_shift),
@@ -458,6 +462,7 @@ def run_summary(
     shifted: pd.DataFrame,
     control_summary: pd.DataFrame,
     fallback_report: pd.DataFrame,
+    exclusions: pd.DataFrame,
     config: Config,
 ) -> dict[str, object]:
     """Counts of the export, as stored in ``run_config.json``.
@@ -472,14 +477,16 @@ def run_summary(
         Candidates and controls per rockfall.
     fallback_report : pandas.DataFrame
         Samples not covered by their own gauge.
+    exclusions : pandas.DataFrame
+        Samples removed from the dataset, with the reason.
     config : Config
         Run settings (controls per rockfall).
 
     Returns
     -------
     dict
-        Sample counts, shifted negatives, rockfalls with fewer controls and
-        the fallback outcomes.
+        Sample counts, shifted negatives, rockfalls with fewer controls,
+        the replacement outcomes and the exclusions.
     """
     rockfalls_with_fewer_controls = (
         control_summary.loc[
@@ -491,17 +498,24 @@ def run_summary(
     )
     # Samples not covered by their own gauge, by sample type and outcome.
     gauge_fallback = (
-        fallback_report.groupby(["sample_type", "status"])
+        fallback_report.groupby(["sample_type", "outcome"])
         .size()
         .unstack(fill_value=0)
         .to_dict(orient="index")
         if not fallback_report.empty
         else {}
     )
-    n_reassigned = (
-        int((fallback_report["status"] == REASSIGNED).sum())
-        if not fallback_report.empty
-        else 0
+    # No such column when the fallback is off: nobody replaced.
+    status = final.get(
+        "rain_station_status", pd.Series(dtype=object)
+    ).value_counts()
+    excluded = (
+        exclusions.groupby(["sample_type", "reason"])
+        .size()
+        .unstack(fill_value=0)
+        .to_dict(orient="index")
+        if not exclusions.empty
+        else {}
     )
     return {
         "n_samples": len(final),
@@ -510,7 +524,11 @@ def run_summary(
         "n_shifted": len(shifted),
         "rockfalls_with_fewer_controls": rockfalls_with_fewer_controls,
         "gauge_fallback": gauge_fallback,
-        "n_fallback_reassigned": n_reassigned,
+        "n_fallback_reassigned": int(
+            status.get(TWIN, 0) + status.get(NEAREST, 0)
+        ),
+        "n_excluded": len(exclusions),
+        "exclusions": excluded,
     }
 
 
