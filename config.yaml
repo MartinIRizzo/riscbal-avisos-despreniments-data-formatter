@@ -76,3 +76,21 @@ fallback:
   min_r: 0.9
   min_common_days: 365
   correlation_period: ["2005-01-01", "2015-12-31"]
+
+# Slope-weighted cost distance to the gauges (see
+# data_formatter/cost_distance.py): reproduces the workmate's ArcGIS
+# Distance Allocation, the slope-weighted Thiessen polygons that gave
+# id_station (vault: D-027, "Cost-distance Thiessen polygons").
+cost_distance:
+  # Phase 1 (2026-11-09): read by scripts/validate_cost_allocation.py only;
+  # the fallback still ranks gauges by straight-line distance.
+  enabled: true
+  # Relative to paths.data. EPSG:25831, 20 m cells, exported from the
+  # workmate's TFM_Martin_Rizzo.gdb (DEM: our 2 m IDEIB DEM of 2024,
+  # aggregated to 20 m). The DEM's NoData cells (the sea) can't be crossed.
+  dem: terrain/DEM20_clip.tif
+  # Cost per metre: slope in degrees, same grid as the DEM.
+  cost: terrain/Slope_DEM20.tif
+  # Cells joined to each cell: 8 (grid moves) or 16 (plus knight moves,
+  # closer to ArcGIS's propagation if 8 agrees poorly).
+  neighbours: 8

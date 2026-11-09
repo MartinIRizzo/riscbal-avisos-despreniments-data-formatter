@@ -3,7 +3,7 @@
 ``Config.from_yaml`` builds one frozen ``Config`` from the file. The values
 and what they mean are documented in ``config.yaml`` itself; this module only
 gives them types. Each optional step (negative shift, temporal controls,
-fallback gauges) has an ``enabled`` flag in its own section. A key missing
+fallback gauges, cost distance) has an ``enabled`` flag in its own section. A key missing
 from the file, or one that isn't expected, raises a ``TypeError`` naming
 it.
 """
@@ -17,6 +17,7 @@ import pandas as pd
 import yaml
 
 from data_formatter.controls import ControlSettings
+from data_formatter.cost_distance import CostDistanceSettings
 from data_formatter.gauge_fallback import FallbackSettings
 
 DEFAULT_CONFIG_FILE = Path("config.yaml")
@@ -92,6 +93,8 @@ class Config:
         Temporal controls.
     fallback : FallbackSettings
         Replacement gauges and exclusions.
+    cost_distance : CostDistanceSettings
+        Slope-weighted cost distance to the gauges.
     """
 
     data_path: Path
@@ -102,6 +105,7 @@ class Config:
     negative_shift: NegativeShiftSettings
     controls: ControlSettings
     fallback: FallbackSettings
+    cost_distance: CostDistanceSettings
 
     @classmethod
     def from_yaml(cls, path: Path) -> Config:
@@ -123,6 +127,7 @@ class Config:
         shift = raw["negative_shift"]
         controls = raw["temporal_controls"]
         fallback = raw["fallback"]
+        cost_distance = raw["cost_distance"]
         return cls(
             data_path=Path(raw["paths"]["data"]),
             runs_path=Path(raw["paths"]["runs"]),
@@ -145,6 +150,13 @@ class Config:
                     "correlation_period": tuple(
                         fallback["correlation_period"]
                     ),
+                }
+            ),
+            cost_distance=CostDistanceSettings(
+                **{
+                    **cost_distance,
+                    "dem": Path(cost_distance["dem"]),
+                    "cost": Path(cost_distance["cost"]),
                 }
             ),
         )

@@ -11,6 +11,8 @@ wheels/
 
 results/
 runs/
+# Script results that don't belong to any run (scripts/validate_cost_allocation.py)
+analyses/
 data/
 .env
 
