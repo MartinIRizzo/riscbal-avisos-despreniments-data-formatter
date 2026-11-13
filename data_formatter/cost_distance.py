@@ -26,7 +26,10 @@ The graph is terrain only, so it never depends on the date. Which gauges
 had data on a date is a separate question: a gauge's cost to a place
 doesn't depend on the other gauges (they aren't barriers), so the cheapest
 gauge among those with data is the same as the allocation recomputed with
-only those gauges (see gauge_fallback.py).
+only those gauges. So one table of costs from every sample's site to every
+gauge (``sample_gauge_costs``) gives, for any date, the slope-weighted
+polygon a site falls in when only some gauges have data: the cheapest of
+them. gauge_fallback.py uses it to choose replacement gauges (vault D-029).
 
 Grid and coordinates: the rasters keep their own CRS (EPSG:25831, ETRS89 /
 UTM 31N) and are never resampled; points (EPSG:32631, WGS 84 / UTM 31N,
@@ -40,6 +43,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import rasterio
 from affine import Affine
 from pyproj import Transformer
@@ -64,6 +68,8 @@ HALF_NEIGHBOURHOODS = {
 MIN_EDGE_COST = 1e-9
 # What scipy's Dijkstra returns as the source of a node no source reaches.
 UNREACHED_SOURCE = -9999
+# CRS of the samples' POINT_X/POINT_Y and of stations.csv (WGS 84 / UTM 31N).
+POINTS_CRS = "EPSG:32631"
 
 
 @dataclass(frozen=True)
@@ -383,3 +389,172 @@ def costs_between(
     for row, source in enumerate(sources):
         table[row] = dijkstra(graph, directed=False, indices=source)[targets]
     return table
+
+
+def sample_gauge_costs(
+    terrain: Terrain,
+    graph: csr_matrix,
+    samples: pd.DataFrame,
+    stations: pd.DataFrame,
+) -> pd.DataFrame:
+    """Accumulated cost from every sample's site to every gauge.
+
+    Samples share sites (a rockfall and its controls are on one cell), so
+    the costs are computed once per cell. One Dijkstra per gauge (61, about
+    1 s each): the graph is undirected, so the cost from a gauge to a site
+    is the cost from the site to the gauge.
+
+    Parameters
+    ----------
+    terrain : Terrain
+        From ``load_terrain``.
+    graph : scipy.sparse.csr_matrix
+        From ``build_graph``.
+    samples : pandas.DataFrame
+        With ``POINT_X`` and ``POINT_Y`` (``POINTS_CRS``).
+    stations : pandas.DataFrame
+        ``stations.csv`` (``code``, ``utm_x``, ``utm_y``).
+
+    Returns
+    -------
+    pandas.DataFrame
+        Indexed like ``samples``, one column per gauge code. inf where
+        there is no land path: a site or gauge off the land grid (logged),
+        or another island.
+    """
+    gauge_nodes = cells_of_points(
+        terrain,
+        stations["utm_x"].to_numpy(),
+        stations["utm_y"].to_numpy(),
+        POINTS_CRS,
+    )
+    site_nodes = cells_of_points(
+        terrain,
+        samples["POINT_X"].to_numpy(),
+        samples["POINT_Y"].to_numpy(),
+        POINTS_CRS,
+    )
+    sites, row_of_sample = np.unique(site_nodes, return_inverse=True)
+    sites_on_land = sites != NO_NODE
+    gauges_on_land = gauge_nodes != NO_NODE
+    for code in stations["code"][~gauges_on_land]:
+        logger.warning(
+            "Gauge %s is not on a land cell: never a candidate", code
+        )
+    off_grid = int((site_nodes == NO_NODE).sum())
+    if off_grid:
+        logger.warning(
+            "%d samples are not on a land cell: no gauge reachable", off_grid
+        )
+
+    costs = np.full((len(sites), len(stations)), np.inf)
+    costs[np.ix_(sites_on_land, gauges_on_land)] = costs_between(
+        graph, gauge_nodes[gauges_on_land], sites[sites_on_land]
+    ).T
+    logger.info(
+        "Cost table: %d sites x %d gauges", sites_on_land.sum(), len(stations)
+    )
+    return pd.DataFrame(
+        costs[row_of_sample],
+        index=samples.index,
+        columns=stations["code"].to_numpy(),
+    )
+
+
+def check_allocation(
+    terrain: Terrain,
+    graph: csr_matrix,
+    samples: pd.DataFrame,
+    stations: pd.DataFrame,
+) -> pd.DataFrame:
+    """Sites whose ``id_station`` isn't the gauge of our allocation.
+
+    A check only (vault D-027): ``id_station`` comes from the workmate's
+    ArcGIS polygons and is never changed. Phase 1 found 4 of 336 points on
+    a boundary where the two disagree.
+
+    Parameters
+    ----------
+    terrain : Terrain
+        From ``load_terrain``.
+    graph : scipy.sparse.csr_matrix
+        From ``build_graph``.
+    samples : pandas.DataFrame
+        With ``sample_id``, ``sample_type``, ``id_station``, ``POINT_X``
+        and ``POINT_Y``.
+    stations : pandas.DataFrame
+        ``stations.csv`` (``id``, ``utm_x``, ``utm_y``).
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per disagreeing site (its first sample): ``sample_id``,
+        ``sample_type``, ``id_station`` and ``allocated_id_station``
+        (``NO_GAUGE`` if the site is off the grid or unreached).
+    """
+    gauge_nodes = cells_of_points(
+        terrain,
+        stations["utm_x"].to_numpy(),
+        stations["utm_y"].to_numpy(),
+        POINTS_CRS,
+    )
+    gauge_of_node, _ = allocate(graph, gauge_nodes, stations["id"].to_numpy())
+    sites = samples.drop_duplicates(["POINT_X", "POINT_Y"])
+    site_nodes = cells_of_points(
+        terrain,
+        sites["POINT_X"].to_numpy(),
+        sites["POINT_Y"].to_numpy(),
+        POINTS_CRS,
+    )
+    allocated = np.full(len(sites), NO_GAUGE, dtype=np.int64)
+    on_land = site_nodes != NO_NODE
+    allocated[on_land] = gauge_of_node[site_nodes[on_land]]
+    differs = allocated != sites["id_station"].to_numpy()
+    return sites.loc[
+        differs, ["sample_id", "sample_type", "id_station"]
+    ].assign(allocated_id_station=allocated[differs])
+
+
+def costs_for_samples(
+    settings: CostDistanceSettings,
+    data_path: Path,
+    samples: pd.DataFrame,
+    stations: pd.DataFrame,
+    output_path: Path,
+) -> pd.DataFrame:
+    """The cost table of a run, with the ``id_station`` check.
+
+    Builds the graph once (~1.2 GB while it lives; freed on return),
+    writes ``allocation_check.csv`` (the sites whose ``id_station`` differs
+    from our allocation; empty if none) and logs a warning if any differ.
+
+    Parameters
+    ----------
+    settings : CostDistanceSettings
+        Terrain rasters and neighbourhood.
+    data_path : pathlib.Path
+        The data folder.
+    samples : pandas.DataFrame
+        All samples (see ``check_allocation``).
+    stations : pandas.DataFrame
+        ``stations.csv``.
+    output_path : pathlib.Path
+        The run's outputs folder.
+
+    Returns
+    -------
+    pandas.DataFrame
+        From ``sample_gauge_costs``.
+    """
+    terrain = load_terrain(settings, data_path)
+    graph = build_graph(terrain, settings.neighbours)
+    disagreements = check_allocation(terrain, graph, samples, stations)
+    disagreements.to_csv(output_path / "allocation_check.csv", index=False)
+    if not disagreements.empty:
+        logger.warning(
+            "%d sites have an id_station that differs from our allocation "
+            "(kept as given, vault D-027; see allocation_check.csv):\n%s",
+            len(disagreements),
+            disagreements.to_string(index=False),
+        )
+    return sample_gauge_costs(terrain, graph, samples, stations)

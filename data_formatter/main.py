@@ -20,6 +20,7 @@ order (each writes its intermediate file to the run's outputs folder,
 4. temporal controls (flag)           controls.py          temporal_controls_summary.csv
 5. replacement gauges (flag)          gauge_fallback.py    gauge_fallback.csv,
                                                            exclusions.csv
+   with cost distance (flag)          cost_distance.py     allocation_check.csv
 6. rain windows                       prec_accumulation.py samples_with_accumulations.csv
 7. susceptibility                     susceptibility.py    samples_with_susceptibility.csv
 8. export                             export.py            final_gdf.csv
@@ -40,6 +41,7 @@ from data_formatter.controls import (
     measured_days,
     with_own_source_ids,
 )
+from data_formatter.cost_distance import costs_for_samples
 from data_formatter.data_loading import load_aemet, load_samples, load_stations
 from data_formatter.export import export_dataset
 from data_formatter.gauge_fallback import no_exclusions, use_fallback_gauges
@@ -105,11 +107,12 @@ def main() -> None:
     outputs = run.outputs
     logger.info(
         "Settings: %s (negative shift %s, temporal controls %s, "
-        "fallback gauges %s)",
+        "fallback gauges %s, cost distance %s)",
         args.config,
         _on_off(config.negative_shift.enabled),
         _on_off(config.controls.enabled),
         _on_off(config.fallback.enabled),
+        _on_off(config.cost_distance.enabled),
     )
 
     stations = load_stations(config)
@@ -147,6 +150,22 @@ def main() -> None:
 
     fallback_report = pd.DataFrame()
     if config.fallback.enabled:
+        # Replacement gauges by per-sample reallocation of the slope-weighted
+        # polygons (D-029), or by straight-line distance with cost off.
+        cost = None
+        if config.cost_distance.enabled:
+            cost = costs_for_samples(
+                config.cost_distance,
+                config.data_path,
+                samples,
+                stations,
+                outputs,
+            )
+        else:
+            logger.info(
+                "Cost distance: off (replacement gauges: nearest within "
+                "max_distance_km)"
+            )
         # Also drops the excluded samples and their controls (D-021, D-023).
         samples, fallback_report, exclusions = use_fallback_gauges(
             samples,
@@ -155,6 +174,7 @@ def main() -> None:
             days_by_gauge,
             config.fallback,
             outputs,
+            cost,
         )
     else:
         logger.info("Fallback gauges: off (nothing excluded)")

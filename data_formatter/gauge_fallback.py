@@ -6,11 +6,14 @@ rain windows are too low. Some rockfalls had no data at all, while the
 temporal controls are >= 90% measured by rule, so the tree models learned
 "no rain data -> rockfall" (vault: "Missing rain data and gauge fallback").
 
-Idea (vault D-012): Thiessen polygons recomputed, for each sample, with only
-the gauges that measured its window. A Thiessen polygon is the area closer
-to one gauge than to any other, so "the polygon it falls in, among the
-gauges with data" is the same as "the nearest gauge with data". No polygons
-have to be drawn: it is enough to rank the gauges by distance.
+Idea (vault D-012, D-029): the slope-weighted Thiessen polygons recomputed,
+for each sample, with only the gauges that measured its window, and the
+gauge of the recomputed polygon the sample falls in. A polygon is the area
+a gauge reaches more cheaply than any other, and a gauge's cost to a place
+doesn't depend on the other gauges, so "the polygon it falls in, among the
+gauges with data" is the same as "the cheapest gauge with data". No
+polygons have to be redrawn: one table of costs from every site to every
+gauge (cost_distance.sample_gauge_costs) is enough.
 
 But distance alone doesn't guarantee the other gauge saw the same rain
 (B001-B780: r = 0.11 at 11 km), so a replacement also has to correlate with
@@ -26,25 +29,33 @@ the own gauge (vault D-021). Rule, applied the same way to every sample
      correlation test, and is <= ``twin_max_distance_km`` from the own gauge
      or has r above ``min_r`` (status ``twin``). A twin takes over the own
      gauge's polygon, so its distance to the sample doesn't matter.
-  3. Otherwise the **nearest** stations.csv gauge <= ``max_distance_km`` from
-     the sample that covers the window and passes the correlation test
-     (status ``nearest``). Nearest, not the highest r: the differences in r
-     between passing gauges are within the uncertainty of r.
+  3. Otherwise **reallocation** (vault D-029): the cheapest stations.csv
+     gauge by cost distance that covers the window, with no distance limit
+     (status ``reallocated``). It must pass the correlation test; if it
+     fails, the sample is excluded: taking the next gauge would use one
+     whose polygon the sample isn't in.
   4. Otherwise the sample is **excluded**, with the reason. If it is a
      rockfall, its temporal controls are excluded too (vault D-023).
+
+With cost distance off (``cost_distance.enabled: false``), step 3 is the
+rule before D-029: the nearest gauge by straight-line distance, within
+``max_distance_km``, that covers the window and passes the correlation test
+(status ``nearest``). With cost distance on, that rule is still evaluated
+and reported (``old_rule_*`` columns of gauge_fallback.csv), so one run
+shows which replacements and exclusions the reallocation changed.
 
 Correlation test: Pearson r of the daily rain of the two gauges over the
 days both have a real reading in ``correlation_period``; at least
 ``min_common_days`` of them and r >= ``min_r``. With 365 days, the 95%
 interval of r around 0.90 is about 0.88-0.92.
 
-Every exclusion is reported (``exclusions.csv``): which sample, why, and the
-gauges that were considered.
+Every exclusion is reported (``exclusions.csv``, in every run, empty if
+none): which sample, why, and the gauges that were considered.
 
 Caveats:
-  - Distance is straight-line (UTM metres), a stand-in for the slope-weighted
-    cost distance of the original polygons. Swap it in ``_distances_km``
-    when the cost-distance table is available.
+  - Twins are chosen by straight-line distance: they are the same site, so
+    km between gauges is the right measure. Straight-line distances are
+    also reported for every gauge chosen (``rain_station_distance_km``).
   - Only the gauge used for the rain changes. The CV group (id_station, the
     original polygon) never changes, so a site and its controls always stay
     in the same LeaveOneGroupOut fold.
@@ -72,7 +83,8 @@ logger = logging.getLogger(__name__)
 # Values of the `rain_station_status` column.
 OWN = "own"  # own gauge covers the window
 TWIN = "twin"  # a twin of the own gauge used instead
-NEAREST = "nearest"  # the nearest gauge that passes used instead
+NEAREST = "nearest"  # the nearest gauge that passes (cost distance off)
+REALLOCATED = "reallocated"  # the cheapest covering gauge (vault D-029)
 NOT_CHECKED = "not_checked"  # gauge outside the AEMET file (RiscBal)
 
 # Reason given in exclusions.csv for the controls of an excluded rockfall.
@@ -80,6 +92,8 @@ ROCKFALL_EXCLUDED = "rockfall excluded"
 
 # Fewer common days than this: r is not computed at all (reported as n/a).
 MIN_DAYS_FOR_ANY_R = 30
+# Cost distances are reported to this many decimals (units: metres x degrees).
+COST_DECIMALS = 1
 # A twin's code is the own code with letters added or removed at the end.
 TWIN_SUFFIX = re.compile(r"[A-Z]+$")
 
@@ -99,6 +113,18 @@ EXCLUSION_COLUMNS = [
     "best_r_gauge",
     "best_r",
     "best_r_km",
+    "reallocated",
+    "reallocated_km",
+    "reallocated_cost",
+    "reallocated_r",
+    "reallocated_common_days",
+    "old_rule_gauge",
+]
+# Columns of EXCLUSION_COLUMNS that are counts (integers with empty cells).
+EXCLUSION_COUNT_COLUMNS = [
+    "own_real_days_90d",
+    "nearest_common_days",
+    "reallocated_common_days",
 ]
 
 
@@ -116,8 +142,9 @@ class FallbackSettings:
         The event day itself must be a real reading (it is the triggering
         rain).
     max_distance_km : float or None
-        Furthest gauge from the sample allowed as a replacement (the twin
-        step aside); None means no limit.
+        Rule before D-029 (cost distance off, and the ``old_rule_*`` report
+        columns): furthest gauge from the sample allowed as a replacement
+        (the twin step aside); None means no limit.
     twin_max_distance_km : float
         A twin must be this close to the own gauge, unless r > ``min_r``.
     min_r : float
@@ -182,12 +209,15 @@ class Candidate:
         Gauge code.
     distance_km : float
         Straight-line distance to the sample.
+    cost : float
+        Cost distance from the sample (NaN with cost distance off).
     correlation : Correlation
         Agreement with the sample's own gauge.
     """
 
     code: str
     distance_km: float
+    cost: float
     correlation: Correlation
 
 
@@ -361,6 +391,7 @@ def _distances_km(samples: pd.DataFrame, stations: pd.DataFrame) -> np.ndarray:
 def _twin(
     own: str,
     distance_km: pd.Series,
+    cost: pd.Series,
     covering: pd.Series,
     station_xy: pd.DataFrame,
     correlations: Correlations,
@@ -374,6 +405,9 @@ def _twin(
         The sample's own gauge.
     distance_km : pandas.Series
         Distance from the sample to every candidate gauge, by code.
+    cost : pandas.Series
+        Cost distance from the sample to every candidate gauge, by code
+        (reported only).
     covering : pandas.Series
         Whether each candidate gauge covers the sample's window, by code.
     station_xy : pandas.DataFrame
@@ -408,7 +442,9 @@ def _twin(
             or correlation.pearson > settings.min_r
         )
         if correlation.passes(settings) and close_or_better:
-            twins.append(Candidate(code, distance_km[code], correlation))
+            twins.append(
+                Candidate(code, distance_km[code], cost[code], correlation)
+            )
     return min(twins, key=lambda twin: twin.distance_km, default=None)
 
 
@@ -439,7 +475,7 @@ def _describe(prefix: str, candidate: Candidate | None) -> dict[str, object]:
     ----------
     prefix : str
         Column prefix, e.g. ``nearest`` gives ``nearest``, ``nearest_km``,
-        ``nearest_r`` and ``nearest_common_days``.
+        ``nearest_cost``, ``nearest_r`` and ``nearest_common_days``.
     candidate : Candidate or None
         The gauge to describe.
 
@@ -452,12 +488,14 @@ def _describe(prefix: str, candidate: Candidate | None) -> dict[str, object]:
         return {
             prefix: None,
             f"{prefix}_km": None,
+            f"{prefix}_cost": None,
             f"{prefix}_r": None,
             f"{prefix}_common_days": None,
         }
     return {
         prefix: candidate.code,
         f"{prefix}_km": round(candidate.distance_km, 2),
+        f"{prefix}_cost": _round_or_none(candidate.cost, COST_DECIMALS),
         f"{prefix}_r": _round_or_none(candidate.correlation.pearson, 3),
         f"{prefix}_common_days": candidate.correlation.common_days,
     }
@@ -497,6 +535,94 @@ def _exclusion_reason(
     return f"correlation below {settings.min_r:g}"
 
 
+def _reallocated(
+    own: str,
+    covering: pd.Series,
+    distance_km: pd.Series,
+    cost: pd.Series,
+    correlations: Correlations,
+) -> Candidate | None:
+    """Step 3 (vault D-029): the gauge of the recomputed polygon.
+
+    Parameters
+    ----------
+    own : str
+        The sample's own gauge (its correlation partner).
+    covering : pandas.Series
+        Whether each candidate gauge covers the sample's window, by code
+        (the own gauge already False).
+    distance_km : pandas.Series
+        Straight-line distance from the sample, by code: breaks exact ties.
+    cost : pandas.Series
+        Cost distance from the sample, by code (inf: no land path).
+    correlations : Correlations
+        Correlation cache.
+
+    Returns
+    -------
+    Candidate or None
+        The cheapest covering, reachable gauge (whether it passes the
+        correlation test is the caller's decision), or None.
+    """
+    reachable = covering & np.isfinite(cost)
+    if not reachable.any():
+        return None
+    # sorted() is stable: on a full tie (co-located gauges, e.g. B013 /
+    # B013X) the first in stations.csv order wins, i.e. the lower id, as in
+    # cost_distance.allocate and ArcGIS.
+    code = min(
+        reachable.index[reachable],
+        key=lambda code: (cost[code], distance_km[code]),
+    )
+    return Candidate(
+        code, distance_km[code], cost[code], correlations.get(own, code)
+    )
+
+
+def _reallocation_reason(
+    reallocated: Candidate | None,
+    covering: pd.Series,
+    settings: FallbackSettings,
+) -> str:
+    """Why a sample whose reallocated gauge can't be used is excluded.
+
+    The reason is a category, so exclusions group by it; the gauge, its r
+    and common days are in the ``reallocated*`` columns.
+
+    Parameters
+    ----------
+    reallocated : Candidate or None
+        From ``_reallocated``.
+    covering : pandas.Series
+        Whether each candidate gauge covers the sample's window, by code.
+    settings : FallbackSettings
+        Correlation thresholds, for the wording.
+
+    Returns
+    -------
+    str
+        The reason, as written in ``exclusions.csv``.
+    """
+    if reallocated is None:
+        return (
+            "no covering gauge reachable (no land path)"
+            if covering.any()
+            else "no gauge covers the window"
+        )
+    correlation = reallocated.correlation
+    if correlation.common_days < settings.min_common_days:
+        return (
+            "reallocated gauge: correlation not assessable "
+            f"(< {settings.min_common_days} common days)"
+        )
+    if np.isnan(correlation.pearson):
+        return (
+            "reallocated gauge: correlation undefined "
+            "(constant rain on the common days)"
+        )
+    return f"reallocated gauge: r below {settings.min_r:g}"
+
+
 def _best_r(
     candidates: list[Candidate], settings: FallbackSettings
 ) -> Candidate | None:
@@ -533,6 +659,7 @@ def assign_replacement_gauges(
     aemet: pd.DataFrame,
     days_by_gauge: dict[str, pd.DatetimeIndex],
     settings: FallbackSettings,
+    cost: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Apply the rule of the module docstring to every sample.
 
@@ -550,24 +677,33 @@ def assign_replacement_gauges(
         Days each AEMET gauge measured (real readings).
     settings : FallbackSettings
         Coverage rule, distances and correlation test.
+    cost : pandas.DataFrame or None
+        Cost distance from every sample to every gauge
+        (``cost_distance.sample_gauge_costs``): step 3 is the reallocation.
+        None (cost distance off): step 3 is the rule before D-029.
 
     Returns
     -------
     samples : pandas.DataFrame
         A copy of all samples (excluded ones included) with ``code``
         updated to the gauge used, plus ``rain_station_original``,
-        ``rain_station_status`` (own, twin, nearest, not_checked; excluded
-        samples keep ``own`` here) and ``rain_station_distance_km``.
+        ``rain_station_status`` (own, twin, reallocated or nearest,
+        not_checked; excluded samples keep ``own`` here),
+        ``rain_station_distance_km`` and ``rain_station_cost``.
     report : pandas.DataFrame
         One row per sample its own gauge didn't cover: own gauge and its
-        real days, the nearest covering gauge, the gauge chosen and the
-        outcome; ``excluded`` marks the samples to drop.
+        real days, the nearest covering gauge within ``max_distance_km``,
+        the reallocated gauge, the gauge chosen and the outcome, and what
+        the rule before D-029 would have done (``old_rule_gauge``,
+        ``old_rule_excluded``, ``rule_changed``); ``excluded`` marks the
+        samples to drop.
     """
     samples = samples.copy()
     dates = pd.DatetimeIndex(samples["date"]).normalize()
     samples["rain_station_original"] = samples["code"]
     samples["rain_station_status"] = NOT_CHECKED
     samples["rain_station_distance_km"] = np.nan
+    samples["rain_station_cost"] = np.nan
 
     # 1. Does the own gauge cover the window?
     own_covers = pd.Series(False, index=samples.index)
@@ -607,9 +743,15 @@ def assign_replacement_gauges(
     for i, (index, sample) in enumerate(todo.iterrows()):
         own, date = sample["code"], todo_dates[i]
         sample_km = pd.Series(distance[i], index=codes)
+        sample_cost = (
+            cost.loc[index, codes]
+            if cost is not None
+            else pd.Series(np.nan, index=codes)
+        )
         covering = pd.Series(covers[i] & (codes != own), index=codes)
 
-        # 3. Covering gauges near the sample, nearest first.
+        # Rule before D-029 (step 3 with cost distance off; reported in
+        # both cases): covering gauges near the sample, nearest first.
         near = covering & (
             sample_km <= settings.max_distance_km
             if settings.max_distance_km is not None
@@ -617,32 +759,69 @@ def assign_replacement_gauges(
         )
         nearby = sorted(
             (
-                Candidate(code, sample_km[code], correlations.get(own, code))
+                Candidate(
+                    code,
+                    sample_km[code],
+                    sample_cost[code],
+                    correlations.get(own, code),
+                )
                 for code in near.index[near]
             ),
             key=lambda candidate: candidate.distance_km,
         )
-        # 2. A twin first; 3. else the nearest that passes.
+        # 2. A twin first.
         twin = _twin(
-            own, sample_km, covering, station_xy, correlations, settings
+            own,
+            sample_km,
+            sample_cost,
+            covering,
+            station_xy,
+            correlations,
+            settings,
         )
         passing = [c for c in nearby if c.correlation.passes(settings)]
-        chosen = twin or (passing[0] if passing else None)
+        old_choice = twin or (passing[0] if passing else None)
+
+        # 3. The reallocated gauge if it passes (cost distance on); else
+        # the rule before D-029.
+        reallocated = None
+        if cost is None:
+            chosen = old_choice
+            replaced_status = NEAREST
+            replaced_outcome = (
+                f"replaced: nearest with r >= {settings.min_r:g}"
+            )
+            reason = _exclusion_reason(nearby, settings)
+        else:
+            reallocated = _reallocated(
+                own, covering, sample_km, sample_cost, correlations
+            )
+            usable = (
+                reallocated is not None
+                and reallocated.correlation.passes(settings)
+            )
+            chosen = twin or (reallocated if usable else None)
+            replaced_status = REALLOCATED
+            replaced_outcome = (
+                f"replaced: reallocated with r >= {settings.min_r:g}"
+            )
+            reason = _reallocation_reason(reallocated, covering, settings)
 
         if twin is not None:
             outcome = "replaced: twin"
         elif chosen is not None:
-            outcome = f"replaced: nearest with r >= {settings.min_r:g}"
+            outcome = replaced_outcome
         else:
-            outcome = f"excluded: {_exclusion_reason(nearby, settings)}"
+            outcome = f"excluded: {reason}"
         if chosen is not None:
             samples.loc[index, "code"] = chosen.code
             samples.loc[index, "rain_station_status"] = (
-                TWIN if twin is not None else NEAREST
+                TWIN if twin is not None else replaced_status
             )
             samples.loc[index, "rain_station_distance_km"] = round(
                 chosen.distance_km, 2
             )
+            samples.loc[index, "rain_station_cost"] = chosen.cost
 
         best = _best_r(nearby, settings)
         rows.append(
@@ -666,9 +845,14 @@ def assign_replacement_gauges(
                 if best
                 else None,
                 "best_r_km": round(best.distance_km, 2) if best else None,
+                **_describe("reallocated", reallocated),
                 **_describe("chosen", chosen),
                 "outcome": outcome,
                 "excluded": chosen is None,
+                "old_rule_gauge": old_choice.code if old_choice else None,
+                "old_rule_excluded": old_choice is None,
+                "rule_changed": (chosen.code if chosen else None)
+                != (old_choice.code if old_choice else None),
             }
         )
     report = pd.DataFrame(rows)
@@ -683,6 +867,14 @@ def assign_replacement_gauges(
         " + event day" if settings.require_event_day else "",
         pd.crosstab(report["sample_type"], report["outcome"]).to_string(),
     )
+    if cost is not None:
+        logger.info(
+            "Reallocation vs the rule before D-029 (nearest within %s km): "
+            "%d samples with another gauge or outcome (rule_changed in "
+            "gauge_fallback.csv)",
+            settings.max_distance_km,
+            int(report["rule_changed"].sum()),
+        )
     return samples, report
 
 
@@ -737,7 +929,7 @@ def drop_excluded(
     ).reindex(columns=EXCLUSION_COLUMNS)
     # Counts stay integers with empty cells (the controls' rows), not 65.0.
     exclusions = exclusions.astype(
-        {"own_real_days_90d": "Int64", "nearest_common_days": "Int64"}
+        dict.fromkeys(EXCLUSION_COUNT_COLUMNS, "Int64")
     )
 
     kept = samples[~samples["sample_id"].isin(exclusions["sample_id"])]
@@ -760,6 +952,7 @@ def use_fallback_gauges(
     days_by_gauge: dict[str, pd.DatetimeIndex],
     settings: FallbackSettings,
     output_path: Path,
+    cost: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Replace or exclude the samples their own gauge didn't measure.
 
@@ -782,6 +975,9 @@ def use_fallback_gauges(
         Coverage rule, distances and correlation test.
     output_path : pathlib.Path
         The run's outputs folder (``runs/<run_id>/outputs/``).
+    cost : pandas.DataFrame or None
+        Cost distance from every sample to every gauge; None with cost
+        distance off (see ``assign_replacement_gauges``).
 
     Returns
     -------
@@ -794,7 +990,7 @@ def use_fallback_gauges(
         One row per sample removed, with the reason.
     """
     samples, report = assign_replacement_gauges(
-        samples, stations, aemet, days_by_gauge, settings
+        samples, stations, aemet, days_by_gauge, settings, cost
     )
     kept, exclusions = drop_excluded(samples, report)
     report.to_csv(output_path / "gauge_fallback.csv", index=False)

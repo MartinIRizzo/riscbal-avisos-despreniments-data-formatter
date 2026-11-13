@@ -59,7 +59,7 @@ import pandas as pd
 
 from data_formatter import inventory
 from data_formatter.config import Config
-from data_formatter.gauge_fallback import NEAREST, TWIN
+from data_formatter.gauge_fallback import NEAREST, REALLOCATED, TWIN
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 RUNS_DIR = PROJECT_ROOT / "runs"
@@ -427,8 +427,20 @@ def settings_record(config: Config) -> dict[str, object]:
             "riscbal_gauges": list(config.riscbal_stations),
             "temporal_controls_at_riscbal_gauges": False,
             "fallback": {
-                "rule": "own gauge if it covers the window; else a twin (same code +/- suffix) or the nearest stations.csv gauge within max_distance_km that covers it, with r >= min_r on >= min_common_days common real days; else excluded (exclusions.csv), with the controls of an excluded rockfall (vault D-021, D-023)",
-                "distance": "straight-line (stand-in for slope-weighted cost distance)",
+                "rule": (
+                    "own gauge if it covers the window; else a twin (same code +/- suffix) with r >= min_r on >= min_common_days common real days; else the slope-weighted polygons reallocated for the sample with the gauges that cover its window: the cheapest by cost distance, no distance limit, used only if it passes the same r test; else excluded (exclusions.csv), with the controls of an excluded rockfall (vault D-021, D-023, D-029)"
+                    if config.cost_distance.enabled
+                    else "own gauge if it covers the window; else a twin (same code +/- suffix) or the nearest stations.csv gauge within max_distance_km that covers it, with r >= min_r on >= min_common_days common real days; else excluded (exclusions.csv), with the controls of an excluded rockfall (vault D-021, D-023)"
+                ),
+                "distance": (
+                    "cost distance (slope-weighted, vault D-027, D-029); max_distance_km only for the old_rule_* comparison columns"
+                    if config.cost_distance.enabled
+                    else "straight-line"
+                ),
+                "cost_distance": {
+                    key: str(value) if isinstance(value, Path) else value
+                    for key, value in vars(config.cost_distance).items()
+                },
                 **{
                     key: list(value) if isinstance(value, tuple) else value
                     for key, value in vars(config.fallback).items()
@@ -525,8 +537,14 @@ def run_summary(
         "rockfalls_with_fewer_controls": rockfalls_with_fewer_controls,
         "gauge_fallback": gauge_fallback,
         "n_fallback_reassigned": int(
-            status.get(TWIN, 0) + status.get(NEAREST, 0)
+            status.get(TWIN, 0)
+            + status.get(NEAREST, 0)
+            + status.get(REALLOCATED, 0)
         ),
+        # Samples whose gauge or outcome differs from the rule before D-029.
+        "n_rule_changed": int(fallback_report["rule_changed"].sum())
+        if "rule_changed" in fallback_report
+        else 0,
         "n_excluded": len(exclusions),
         "exclusions": excluded,
     }

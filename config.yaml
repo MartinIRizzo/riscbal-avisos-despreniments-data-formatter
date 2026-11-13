@@ -53,11 +53,12 @@ temporal_controls:
   seed: 42
 
 # Replacement gauge (see data_formatter/gauge_fallback.py): if a sample's
-# own gauge didn't measure its window, a twin of it or the nearest
-# stations.csv gauge that did, if their daily rain agrees; otherwise the
-# sample is excluded (and reported in exclusions.csv). Days of -4 runs are
-# not measured (vault: D-015). Distance is straight-line for now (stand-in
-# for the slope-weighted one).
+# own gauge didn't measure its window, a twin of it, or else the gauge of
+# the slope-weighted polygon the sample falls in when the polygons are
+# recomputed with only the gauges that measured it (cost_distance on; vault
+# D-029), if their daily rain agrees with the own gauge; otherwise the
+# sample is excluded (reported in exclusions.csv, in every run). Days of -4
+# runs are not measured (vault: D-015).
 fallback:
   # Under-measured samples read rain from another gauge or are excluded
   # (vault: D-012, D-021). Off: every sample keeps its own gauge.
@@ -65,7 +66,9 @@ fallback:
   # Same threshold as the temporal controls (real readings only).
   min_coverage: 0.9
   require_event_day: true
-  # Rain in the Tramuntana changes over a few km: no gauge further away.
+  # Rule before D-029, used only with cost_distance off (the nearest gauge
+  # within this distance) and, with it on, for the old_rule_* comparison
+  # columns of gauge_fallback.csv. The reallocation has no distance limit.
   max_distance_km: 5.0
   # A twin (same code +/- a suffix, e.g. B158 / B158X) must be this close
   # to the own gauge, unless r > min_r (vault: D-021).
@@ -82,8 +85,10 @@ fallback:
 # Distance Allocation, the slope-weighted Thiessen polygons that gave
 # id_station (vault: D-027, "Cost-distance Thiessen polygons").
 cost_distance:
-  # Phase 1 (2026-11-09): read by scripts/validate_cost_allocation.py only;
-  # the fallback still ranks gauges by straight-line distance.
+  # On: replacement gauges by per-sample reallocation (vault D-029), and
+  # every run writes allocation_check.csv (id_station vs our allocation).
+  # Off: the nearest gauge within fallback.max_distance_km (rule before
+  # D-029). Also read by scripts/validate_cost_allocation.py.
   enabled: true
   # Relative to paths.data. EPSG:25831, 20 m cells, exported from the
   # workmate's TFM_Martin_Rizzo.gdb (DEM: our 2 m IDEIB DEM of 2024,
