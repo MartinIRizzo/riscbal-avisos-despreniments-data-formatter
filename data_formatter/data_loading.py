@@ -2,10 +2,12 @@
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from data_formatter.aemet_formatter import format_aemet_data
 from data_formatter.config import Config
+from data_formatter.cost_distance import allocate_points
 from data_formatter.inventory import SAMPLES_DATE_FORMAT, build_samples
 
 # The reshaped AEMET table, gzipped (pandas infers it from the extension).
@@ -48,7 +50,8 @@ def load_samples(
     Parameters
     ----------
     config : Config
-        Run settings (paths, gauge reassignments).
+        Run settings (paths, inventory realignment flag, gauge
+        reassignments).
     stations : pandas.DataFrame
         From ``load_stations``.
     output_path : pathlib.Path
@@ -61,7 +64,22 @@ def load_samples(
     """
     # Rockfalls from the original inventory (correct day-first dates) and
     # recent_rockfalls.csv, negatives from negatives.csv. See inventory.py.
-    samples = build_samples(config.data_path, output_path)
+    # Rockfall places missing from event_stations.csv (rockfalls recovered by
+    # the inventory realignment) get the gauge of our reproduction of the
+    # ArcGIS allocation, if cost distance is on; else they are excluded.
+    allocate_missing = None
+    if config.cost_distance.enabled:
+        def allocate_missing(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+            return allocate_points(
+                config.cost_distance, config.data_path, stations, x, y
+            )
+
+    samples = build_samples(
+        config.data_path,
+        output_path,
+        config.inventory_realignment.enabled,
+        allocate_missing,
+    )
 
     # Each sample's gauge comes from the workmate's slope-weighted Thiessen
     # polygons (id_station, from event_stations.csv and negatives.csv), not

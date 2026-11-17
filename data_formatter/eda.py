@@ -2,7 +2,7 @@
 
 Run by the export step. The correlation heatmaps show why the slope and
 elevation columns are dropped from ``final_gdf.csv`` (they overlap too much
-with each other; vault D-005).
+with each other).
 """
 
 import logging

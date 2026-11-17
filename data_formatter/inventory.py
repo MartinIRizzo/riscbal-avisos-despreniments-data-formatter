@@ -29,9 +29,13 @@ With the layer, both would be replaced by a point-in-polygon join.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
+
+from data_formatter.inventory_alignment import realign_records
 
 logger = logging.getLogger(__name__)
 
@@ -210,18 +214,27 @@ def _report(step: str, n: int) -> None:
 # --------------------------------------------------------------------------
 
 
-def load_inventory_events(data_path: Path) -> pd.DataFrame:
+def load_inventory_events(
+    data_path: Path, realign: bool, output_path: Path
+) -> pd.DataFrame:
     """Slides and rockfalls from the inventory, dated within the study period.
 
     Keeps events of type ``EVENT_TYPE`` with an exact date (parsed with
     ``INVENTORY_DATE_FORMAT``) in ``PERIOD_START`` .. ``PERIOD_END``, with
     every ``REQUIRED_COLUMNS`` value present, and drops duplicates (same
-    place and date). Each step's count is logged.
+    place and date). Each step's count is logged. With ``realign``, the
+    record columns (date, description, ...) are first rejoined to their
+    events by identifier (inventory_alignment.py): in part of the file they
+    sit on another event's line.
 
     Parameters
     ----------
     data_path : pathlib.Path
         Input folder (holds ``INVENTORY_FILE``).
+    realign : bool
+        Rejoin the record columns (the ``inventory_realignment`` flag).
+    output_path : pathlib.Path
+        The run's outputs folder (for the realignment report).
 
     Returns
     -------
@@ -236,6 +249,10 @@ def load_inventory_events(data_path: Path) -> pd.DataFrame:
     # Line number in the CSV file (header is line 1), to trace each sample back.
     inventory["inventory_line"] = inventory.index + 2
     _report("inventory events", len(inventory))
+    if realign:
+        inventory = realign_records(inventory, output_path)
+    else:
+        logger.info("  Inventory realignment: off (records read as they are)")
 
     events = inventory[inventory["Tipo"] == EVENT_TYPE].copy()
     _report(f"type '{EVENT_TYPE}'", len(events))
@@ -266,16 +283,31 @@ def load_inventory_events(data_path: Path) -> pd.DataFrame:
     return events
 
 
+# Where a rockfall's id_station comes from (inventory_selection_report.csv).
+STATION_FROM_ARCGIS = "event_stations.csv"
+STATION_FROM_ALLOCATION = "cost-distance allocation"
+
+# Gauge of our slope-weighted allocation at points (x, y); see
+# cost_distance.allocate_points. -1 where there is none.
+PointAllocator = Callable[[np.ndarray, np.ndarray], np.ndarray]
+
+
 def assign_stations(
-    events: pd.DataFrame, event_stations: pd.DataFrame, label: str
+    events: pd.DataFrame,
+    event_stations: pd.DataFrame,
+    label: str,
+    allocate_missing: PointAllocator | None = None,
 ) -> pd.DataFrame:
     """Take each rockfall's rain gauge from event_stations.csv, by place.
 
     The stations come from slope-weighted Thiessen polygons built in ArcGIS.
     They can't be recomputed from stations.csv (the nearest station agrees
     only for ~65% of samples, as expected for a slope-weighted partition),
-    so they are reused as is. Events without a station are excluded and
-    logged.
+    so they are reused as is. Events whose place isn't in event_stations.csv
+    (e.g. rockfalls recovered by the inventory realignment, which were never
+    samples when the workmate built the file) get the gauge of our
+    reproduction of that allocation, if ``allocate_missing`` is given;
+    otherwise, or if it gives none, they are excluded and logged.
 
     Parameters
     ----------
@@ -285,11 +317,16 @@ def assign_stations(
         ``event_stations.csv``: ``POINT_X``, ``POINT_Y``, ``id_station``.
     label : str
         What the events are, for the log messages.
+    allocate_missing : callable or None
+        Gauge of our allocation at points (x, y), for the places missing
+        from ``event_stations``; None to exclude them.
 
     Returns
     -------
     pandas.DataFrame
-        The events that have a station, with ``id_station`` (int).
+        The events that have a station, with ``id_station`` (int) and
+        ``id_station_source`` (``STATION_FROM_ARCGIS`` or
+        ``STATION_FROM_ALLOCATION``).
 
     Raises
     ------
@@ -309,6 +346,28 @@ def assign_stations(
     events["id_station"] = _coordinate_key(events).map(
         station_by_location.apply(lambda ids: ids[0])
     )
+    events["id_station_source"] = np.where(
+        events["id_station"].notna(), STATION_FROM_ARCGIS, ""
+    )
+    missing = events["id_station"].isna()
+    if missing.any() and allocate_missing is not None:
+        allocated = allocate_missing(
+            events.loc[missing, "POINT_X"].to_numpy(),
+            events.loc[missing, "POINT_Y"].to_numpy(),
+        )
+        found = allocated >= 0
+        filled = events.index[missing][found]
+        events.loc[filled, "id_station"] = allocated[found]
+        events.loc[filled, "id_station_source"] = STATION_FROM_ALLOCATION
+        logger.info(
+            "%d %s are not in %s; gauge from our cost-distance allocation:\n%s",
+            len(filled),
+            label,
+            EVENT_STATIONS_FILE,
+            events.loc[
+                filled, ["Municipio", "Fecha", "POINT_X", "POINT_Y", "id_station"]
+            ].to_string(index=False),
+        )
     unmatched = events[events["id_station"].isna()]
     if not unmatched.empty:
         logger.warning(
@@ -322,11 +381,16 @@ def assign_stations(
         )
     events = events.dropna(subset=["id_station"])
     events["id_station"] = events["id_station"].astype(int)
-    _report(f"{label} with a station from {EVENT_STATIONS_FILE}", len(events))
+    _report(f"{label} with a station", len(events))
     return events
 
 
-def build_samples(data_path: Path, output_path: Path) -> pd.DataFrame:
+def build_samples(
+    data_path: Path,
+    output_path: Path,
+    realign: bool,
+    allocate_missing: PointAllocator | None = None,
+) -> pd.DataFrame:
     """Samples in samples.csv format: inventory + recent rockfalls + negatives.
 
     Writes ``samples_from_inventory.csv`` (the table) and
@@ -340,6 +404,12 @@ def build_samples(data_path: Path, output_path: Path) -> pd.DataFrame:
         ``negatives.csv``, ``event_stations.csv``).
     output_path : pathlib.Path
         The run's outputs folder (``runs/<run_id>/outputs/``).
+    realign : bool
+        Rejoin the inventory's record columns to their events (the
+        ``inventory_realignment`` flag; see ``load_inventory_events``).
+    allocate_missing : callable or None
+        Gauge for rockfall places missing from ``event_stations.csv``
+        (see ``assign_stations``).
 
     Returns
     -------
@@ -360,7 +430,10 @@ def build_samples(data_path: Path, output_path: Path) -> pd.DataFrame:
     ]
 
     events = assign_stations(
-        load_inventory_events(data_path), event_stations, "inventory events"
+        load_inventory_events(data_path, realign, output_path),
+        event_stations,
+        "inventory events",
+        allocate_missing,
     )
     events["source"] = "inventory"
     events["sample_id"] = "inv_" + events["inventory_line"].astype(str)
@@ -370,7 +443,9 @@ def build_samples(data_path: Path, output_path: Path) -> pd.DataFrame:
         f"recent_{row}" for row in range(1, len(recent) + 1)
     ]
     _report(f"recent rockfalls in {RECENT_EVENTS_FILE}", len(recent))
-    recent = assign_stations(recent, event_stations, "recent rockfalls")
+    recent = assign_stations(
+        recent, event_stations, "recent rockfalls", allocate_missing
+    )
     recent["source"] = RECENT_EVENTS_FILE
 
     negatives = _read_sample_file(
@@ -413,7 +488,7 @@ def _selection_report(
     """Where each rockfall comes from (``inventory_selection_report.csv``).
 
     The comparison with the old, swapped samples.csv dates was a one-off
-    check; see progress/2026-10-16-samples-from-inventory.md.
+    check, not repeated here.
 
     Parameters
     ----------
@@ -427,7 +502,8 @@ def _selection_report(
     pandas.DataFrame
         One row per rockfall: ``sample_id``, ``source``, ``inventory_line``,
         ``classification``, ``data_source``, ``municipality``, ``date``,
-        ``id_station`` (inventory columns empty for the recent ones).
+        ``id_station``, ``id_station_source`` (inventory columns empty for
+        the recent ones).
     """
     report = pd.DataFrame(
         {
@@ -439,6 +515,7 @@ def _selection_report(
             "municipality": events["Municipio"],
             "date": events["date"].dt.date,
             "id_station": events["id_station"],
+            "id_station_source": events["id_station_source"],
         }
     )
     recent_rows = pd.DataFrame(
@@ -448,6 +525,7 @@ def _selection_report(
             "municipality": recent["Municipio"],
             "date": recent["date"].dt.date,
             "id_station": recent["id_station"],
+            "id_station_source": recent["id_station_source"],
         }
     )
     return pd.concat([report, recent_rows], ignore_index=True)

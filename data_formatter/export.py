@@ -12,7 +12,7 @@ def export_dataset(samples: pd.DataFrame, output_path: Path) -> pd.DataFrame:
 
     The target becomes 1/0, the EDA plots are drawn, and the slope and
     elevation columns are dropped (they overlap too much with each other;
-    see eda.py and vault D-005).
+    see eda.py).
 
     Parameters
     ----------

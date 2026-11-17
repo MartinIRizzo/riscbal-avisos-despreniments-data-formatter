@@ -57,7 +57,7 @@ from types import TracebackType
 
 import pandas as pd
 
-from data_formatter import inventory
+from data_formatter import inventory, inventory_alignment
 from data_formatter.config import Config
 from data_formatter.gauge_fallback import NEAREST, REALLOCATED, TWIN
 
@@ -417,6 +417,15 @@ def settings_record(config: Config) -> dict[str, object]:
             ],
             "coordinate_match_decimals": inventory.COORDINATE_DECIMALS,
             "required_columns": inventory.REQUIRED_COLUMNS,
+            "inventory_realignment": {
+                "enabled": config.inventory_realignment.enabled,
+                "rule": (
+                    f"each event line gets the record columns of the line whose "
+                    f"{inventory_alignment.RECORD_ID} = its "
+                    f"{inventory_alignment.EVENT_ID} - {inventory_alignment.ID_OFFSET}; "
+                    "the run stops if a joined line contradicts itself on a shared field"
+                ),
+            },
         },
         "gauges": {
             "assignment": "slope-weighted Thiessen polygons (ArcGIS, workmate); event_stations.csv and negatives.csv",
@@ -428,12 +437,12 @@ def settings_record(config: Config) -> dict[str, object]:
             "temporal_controls_at_riscbal_gauges": False,
             "fallback": {
                 "rule": (
-                    "own gauge if it covers the window; else a twin (same code +/- suffix) with r >= min_r on >= min_common_days common real days; else the slope-weighted polygons reallocated for the sample with the gauges that cover its window: the cheapest by cost distance, no distance limit, used only if it passes the same r test; else excluded (exclusions.csv), with the controls of an excluded rockfall (vault D-021, D-023, D-029)"
+                    "own gauge if it covers the window; else a twin (same code +/- suffix) with r >= min_r on >= min_common_days common real days; else the slope-weighted polygons reallocated for the sample with the gauges that cover its window: the cheapest by cost distance, no distance limit, used only if it passes the same r test; else excluded (exclusions.csv), with the controls of an excluded rockfall"
                     if config.cost_distance.enabled
-                    else "own gauge if it covers the window; else a twin (same code +/- suffix) or the nearest stations.csv gauge within max_distance_km that covers it, with r >= min_r on >= min_common_days common real days; else excluded (exclusions.csv), with the controls of an excluded rockfall (vault D-021, D-023)"
+                    else "own gauge if it covers the window; else a twin (same code +/- suffix) or the nearest stations.csv gauge within max_distance_km that covers it, with r >= min_r on >= min_common_days common real days; else excluded (exclusions.csv), with the controls of an excluded rockfall"
                 ),
                 "distance": (
-                    "cost distance (slope-weighted, vault D-027, D-029); max_distance_km only for the old_rule_* comparison columns"
+                    "cost distance (slope-weighted); max_distance_km only for the old_rule_* comparison columns"
                     if config.cost_distance.enabled
                     else "straight-line"
                 ),
@@ -454,7 +463,7 @@ def settings_record(config: Config) -> dict[str, object]:
                 / SECONDS_PER_HOUR
             ),
             "missing_days": "counted as 0 mm (see rain_days_90d); under-measured samples use a replacement gauge or are excluded (gauges.fallback)",
-            "accumulated_days": "-4 runs (the -4 days and the closing day) are not measured: they count against coverage and never count as a real reading (vault D-015); the sums keep their spread share",
+            "accumulated_days": "-4 runs (the -4 days and the closing day) are not measured: they count against coverage and never count as a real reading; the sums keep their spread share",
         },
         "negative_shift": {
             **asdict(config.negative_shift),
@@ -541,7 +550,7 @@ def run_summary(
             + status.get(NEAREST, 0)
             + status.get(REALLOCATED, 0)
         ),
-        # Samples whose gauge or outcome differs from the rule before D-029.
+        # Samples whose gauge or outcome differs from the rule before the reallocation.
         "n_rule_changed": int(fallback_report["rule_changed"].sum())
         if "rule_changed" in fallback_report
         else 0,

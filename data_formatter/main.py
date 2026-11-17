@@ -15,6 +15,7 @@ order (each writes its intermediate file to the run's outputs folder,
 ``runs/<run_id>/outputs/``; nothing is written anywhere else):
 
 1. samples and their gauges           data_loading.py      samples_with_stations.csv
+   inventory realignment (flag)       inventory_alignment.py inventory_realignment.csv
 2. reshaped AEMET daily rain          data_loading.py      formatted_historical_aemet_data.csv
 3. negative shift (flag)              negative_shift.py    shifted_negatives.csv
 4. temporal controls (flag)           controls.py          temporal_controls_summary.csv
@@ -106,9 +107,10 @@ def main() -> None:
     run = FormatterRun(config.runs_path)
     outputs = run.outputs
     logger.info(
-        "Settings: %s (negative shift %s, temporal controls %s, "
-        "fallback gauges %s, cost distance %s)",
+        "Settings: %s (inventory realignment %s, negative shift %s, "
+        "temporal controls %s, fallback gauges %s, cost distance %s)",
         args.config,
+        _on_off(config.inventory_realignment.enabled),
         _on_off(config.negative_shift.enabled),
         _on_off(config.controls.enabled),
         _on_off(config.fallback.enabled),
@@ -151,7 +153,7 @@ def main() -> None:
     fallback_report = pd.DataFrame()
     if config.fallback.enabled:
         # Replacement gauges by per-sample reallocation of the slope-weighted
-        # polygons (D-029), or by straight-line distance with cost off.
+        # polygons, or by straight-line distance with cost off.
         cost = None
         if config.cost_distance.enabled:
             cost = costs_for_samples(
@@ -166,7 +168,8 @@ def main() -> None:
                 "Cost distance: off (replacement gauges: nearest within "
                 "max_distance_km)"
             )
-        # Also drops the excluded samples and their controls (D-021, D-023).
+        # Also drops the excluded samples and the controls of an excluded
+        # rockfall.
         samples, fallback_report, exclusions = use_fallback_gauges(
             samples,
             stations,

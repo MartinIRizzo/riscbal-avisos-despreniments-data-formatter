@@ -2,8 +2,9 @@
 
 ``Config.from_yaml`` builds one frozen ``Config`` from the file. The values
 and what they mean are documented in ``config.yaml`` itself; this module only
-gives them types. Each optional step (negative shift, temporal controls,
-fallback gauges, cost distance) has an ``enabled`` flag in its own section. A key missing
+gives them types. Each optional step (inventory realignment, negative shift,
+temporal controls, fallback gauges, cost distance) has an ``enabled`` flag
+in its own section. A key missing
 from the file, or one that isn't expected, raises a ``TypeError`` naming
 it.
 """
@@ -19,6 +20,7 @@ import yaml
 from data_formatter.controls import ControlSettings
 from data_formatter.cost_distance import CostDistanceSettings
 from data_formatter.gauge_fallback import FallbackSettings
+from data_formatter.inventory_alignment import RealignmentSettings
 
 DEFAULT_CONFIG_FILE = Path("config.yaml")
 
@@ -87,6 +89,8 @@ class Config:
         Start of the pluviometric day (07:00 UTC), for the RiscBal gauges.
     gauge_reassignments : tuple of GaugeReassignment
         Hand-made gauge changes (Esporles).
+    inventory_realignment : RealignmentSettings
+        Rejoining the inventory's record columns to their events.
     negative_shift : NegativeShiftSettings
         The original negative sampling.
     controls : ControlSettings
@@ -102,6 +106,7 @@ class Config:
     riscbal_stations: tuple[str, ...]
     pluviometric_day_offset: pd.Timedelta
     gauge_reassignments: tuple[GaugeReassignment, ...]
+    inventory_realignment: RealignmentSettings
     negative_shift: NegativeShiftSettings
     controls: ControlSettings
     fallback: FallbackSettings
@@ -137,6 +142,9 @@ class Config:
             ),
             gauge_reassignments=tuple(
                 GaugeReassignment(**item) for item in gauges["reassignments"]
+            ),
+            inventory_realignment=RealignmentSettings(
+                **raw["inventory_realignment"]
             ),
             negative_shift=NegativeShiftSettings(
                 **{**shift, "period": tuple(shift["period"])}

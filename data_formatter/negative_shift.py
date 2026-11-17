@@ -1,9 +1,9 @@
 """The original negative sampling: move random points to high-rainfall days.
 
 ``share`` of the random points get a random day with rain >= their station's
-``percentile``, within ``period``. Off since Phase B0 (2026-10-17): the moved
+``percentile``, within ``period``. Off since 2026-10-17: the moved
 negatives were much wetter than the rockfalls and every model learned "more
-rain -> less risk" (vault: D-008). Kept behind the feature flag
+rain -> less risk". Kept behind the feature flag
 ``negative_shift.enabled`` in ``config.yaml``.
 """
 

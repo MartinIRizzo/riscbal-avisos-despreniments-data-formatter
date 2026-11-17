@@ -1,8 +1,7 @@
 """Offline gauge replacement study: -4 days as not measured, correlation check.
 
 Diagnostic only (no database, doesn't change the pipeline). It reproduces the
-study of 2026-11-02 (vault note "Gauge replacement study (2026-11-02)",
-decision D-021): which samples aren't covered by their own gauge once the
+study of 2026-11-02: which samples aren't covered by their own gauge once the
 days of -4 runs count as not measured, which replacement gauge passes the
 correlation rule, and which samples would be excluded. The twin step here
 is the one of that study (any gauge <= 1 km from the own gauge); the final

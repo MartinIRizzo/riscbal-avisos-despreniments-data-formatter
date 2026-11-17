@@ -13,7 +13,7 @@ codes appear:
 The ``-4`` totals are spread evenly over the days of their run, which keeps
 the totals right but not their timing. Those days are flagged in the
 ``accumulated`` column, so later steps can tell a real daily reading from a
-spread one (see the vault note "Accumulated -4 readings").
+spread one.
 """
 
 import numpy as np

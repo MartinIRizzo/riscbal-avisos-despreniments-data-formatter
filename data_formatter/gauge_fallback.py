@@ -4,9 +4,9 @@ Problem: a sample's rain comes from the gauge of its slope-weighted Thiessen
 polygon. When that gauge has gaps, the missing days count as 0 mm, and the
 rain windows are too low. Some rockfalls had no data at all, while the
 temporal controls are >= 90% measured by rule, so the tree models learned
-"no rain data -> rockfall" (vault: "Missing rain data and gauge fallback").
+"no rain data -> rockfall".
 
-Idea (vault D-012, D-029): the slope-weighted Thiessen polygons recomputed,
+Idea: the slope-weighted Thiessen polygons recomputed,
 for each sample, with only the gauges that measured its window, and the
 gauge of the recomputed polygon the sample falls in. A polygon is the area
 a gauge reaches more cheaply than any other, and a gauge's cost to a place
@@ -17,28 +17,28 @@ gauge (cost_distance.sample_gauge_costs) is enough.
 
 But distance alone doesn't guarantee the other gauge saw the same rain
 (B001-B780: r = 0.11 at 11 km), so a replacement also has to correlate with
-the own gauge (vault D-021). Rule, applied the same way to every sample
+the own gauge. Rule, applied the same way to every sample
 (rockfall, control, random point) at an AEMET gauge:
 
   1. If the own gauge covers the window, keep it (status ``own``). Covering
      means at least ``min_coverage`` of the 90 days before the event are
      real readings and, if ``require_event_day``, the event day is one.
-     Days of -4 runs are not real readings (vault D-015; controls.py).
+     Days of -4 runs are not real readings (see controls.py).
   2. Otherwise a **twin** of the own gauge (same code with a suffix added or
      removed, e.g. B158 / B158X) that covers the window and passes the
      correlation test, and is <= ``twin_max_distance_km`` from the own gauge
      or has r above ``min_r`` (status ``twin``). A twin takes over the own
      gauge's polygon, so its distance to the sample doesn't matter.
-  3. Otherwise **reallocation** (vault D-029): the cheapest stations.csv
+  3. Otherwise **reallocation**: the cheapest stations.csv
      gauge by cost distance that covers the window, with no distance limit
      (status ``reallocated``). It must pass the correlation test; if it
      fails, the sample is excluded: taking the next gauge would use one
      whose polygon the sample isn't in.
   4. Otherwise the sample is **excluded**, with the reason. If it is a
-     rockfall, its temporal controls are excluded too (vault D-023).
+     rockfall, its temporal controls are excluded too.
 
 With cost distance off (``cost_distance.enabled: false``), step 3 is the
-rule before D-029: the nearest gauge by straight-line distance, within
+rule before the reallocation: the nearest gauge by straight-line distance, within
 ``max_distance_km``, that covers the window and passes the correlation test
 (status ``nearest``). With cost distance on, that rule is still evaluated
 and reported (``old_rule_*`` columns of gauge_fallback.csv), so one run
@@ -84,7 +84,7 @@ logger = logging.getLogger(__name__)
 OWN = "own"  # own gauge covers the window
 TWIN = "twin"  # a twin of the own gauge used instead
 NEAREST = "nearest"  # the nearest gauge that passes (cost distance off)
-REALLOCATED = "reallocated"  # the cheapest covering gauge (vault D-029)
+REALLOCATED = "reallocated"  # the cheapest covering gauge
 NOT_CHECKED = "not_checked"  # gauge outside the AEMET file (RiscBal)
 
 # Reason given in exclusions.csv for the controls of an excluded rockfall.
@@ -142,7 +142,7 @@ class FallbackSettings:
         The event day itself must be a real reading (it is the triggering
         rain).
     max_distance_km : float or None
-        Rule before D-029 (cost distance off, and the ``old_rule_*`` report
+        Rule before the reallocation (cost distance off, and the ``old_rule_*`` report
         columns): furthest gauge from the sample allowed as a replacement
         (the twin step aside); None means no limit.
     twin_max_distance_km : float
@@ -316,7 +316,7 @@ def is_twin(first: str, second: str) -> bool:
     """Whether two gauge codes are twins: the same code ± a letter suffix.
 
     E.g. B158 / B158X, B087 / B087X, B684 / B684A. B174 / B186 are not
-    twins, however close (vault D-021).
+    twins, however close.
 
     Parameters
     ----------
@@ -542,7 +542,7 @@ def _reallocated(
     cost: pd.Series,
     correlations: Correlations,
 ) -> Candidate | None:
-    """Step 3 (vault D-029): the gauge of the recomputed polygon.
+    """Step 3: the gauge of the recomputed polygon.
 
     Parameters
     ----------
@@ -680,7 +680,7 @@ def assign_replacement_gauges(
     cost : pandas.DataFrame or None
         Cost distance from every sample to every gauge
         (``cost_distance.sample_gauge_costs``): step 3 is the reallocation.
-        None (cost distance off): step 3 is the rule before D-029.
+        None (cost distance off): step 3 is the rule before the reallocation.
 
     Returns
     -------
@@ -694,7 +694,7 @@ def assign_replacement_gauges(
         One row per sample its own gauge didn't cover: own gauge and its
         real days, the nearest covering gauge within ``max_distance_km``,
         the reallocated gauge, the gauge chosen and the outcome, and what
-        the rule before D-029 would have done (``old_rule_gauge``,
+        the rule before the reallocation would have done (``old_rule_gauge``,
         ``old_rule_excluded``, ``rule_changed``); ``excluded`` marks the
         samples to drop.
     """
@@ -750,7 +750,7 @@ def assign_replacement_gauges(
         )
         covering = pd.Series(covers[i] & (codes != own), index=codes)
 
-        # Rule before D-029 (step 3 with cost distance off; reported in
+        # Rule before the reallocation (step 3 with cost distance off; reported in
         # both cases): covering gauges near the sample, nearest first.
         near = covering & (
             sample_km <= settings.max_distance_km
@@ -783,7 +783,7 @@ def assign_replacement_gauges(
         old_choice = twin or (passing[0] if passing else None)
 
         # 3. The reallocated gauge if it passes (cost distance on); else
-        # the rule before D-029.
+        # the rule before the reallocation.
         reallocated = None
         if cost is None:
             chosen = old_choice
@@ -869,7 +869,7 @@ def assign_replacement_gauges(
     )
     if cost is not None:
         logger.info(
-            "Reallocation vs the rule before D-029 (nearest within %s km): "
+            "Reallocation vs the rule before the reallocation (nearest within %s km): "
             "%d samples with another gauge or outcome (rule_changed in "
             "gauge_fallback.csv)",
             settings.max_distance_km,
@@ -896,8 +896,7 @@ def drop_excluded(
         The samples that stay in the dataset.
     exclusions : pandas.DataFrame
         One row per removed sample (``EXCLUSION_COLUMNS``): its own reason,
-        or ``rockfall excluded`` for the controls of an excluded rockfall
-        (vault D-023).
+        or ``rockfall excluded`` for the controls of an excluded rockfall.
     """
     if report.empty:
         return samples, pd.DataFrame(columns=EXCLUSION_COLUMNS)

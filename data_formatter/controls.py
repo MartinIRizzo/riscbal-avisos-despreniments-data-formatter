@@ -1,4 +1,4 @@
-"""Temporal controls: non-rockfall days at each rockfall's own site (Phase B1).
+"""Temporal controls: non-rockfall days at each rockfall's own site.
 
 For every rockfall, K other days are drawn at random from its rain gauge's
 record, and each becomes a negative sample at the *same place*. This is the
@@ -86,8 +86,8 @@ def measured_days(
     The formatted AEMET table has one row per station and day with a value;
     a missing day has no row. Days of a -4 run (``accumulated``: the -4 days
     and the day that closes the run) are left out too: their value is an
-    even share of a multi-day total, so the day's own rain is unknown (vault
-    D-015). They still add their share to the rain windows
+    even share of a multi-day total, so the day's own rain is unknown. They
+    still add their share to the rain windows
     (prec_accumulation.py); here they only stop counting as measured, so
     they count against coverage and can trigger a replacement gauge.
 
@@ -204,7 +204,7 @@ def candidate_days(
 
 
 def rockfall_rng(seed: int, sample_id: str) -> np.random.Generator:
-    """The random generator of one rockfall's controls (vault D-022).
+    """The random generator of one rockfall's controls.
 
     NumPy turns a list of integers into one seed (``SeedSequence``), and
     different lists give independent streams. So each rockfall draws from

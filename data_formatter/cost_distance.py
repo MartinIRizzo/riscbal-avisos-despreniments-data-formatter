@@ -1,8 +1,7 @@
 """Slope-weighted cost distance between places and rain gauges.
 
 Reproduces the workmate's slope-weighted Thiessen polygons (ArcGIS
-Distance Allocation, ``DistAll_slope_v4`` in their project; vault D-027,
-"Cost-distance Thiessen polygons"), so the formatter can measure "how far"
+Distance Allocation, ``DistAll_slope_v4`` in their project), so the formatter can measure "how far"
 a sample is from each gauge the same way the polygons did.
 
 Method, as in ArcGIS:
@@ -29,7 +28,7 @@ gauge among those with data is the same as the allocation recomputed with
 only those gauges. So one table of costs from every sample's site to every
 gauge (``sample_gauge_costs``) gives, for any date, the slope-weighted
 polygon a site falls in when only some gauges have data: the cheapest of
-them. gauge_fallback.py uses it to choose replacement gauges (vault D-029).
+them. gauge_fallback.py uses it to choose replacement gauges.
 
 Grid and coordinates: the rasters keep their own CRS (EPSG:25831, ETRS89 /
 UTM 31N) and are never resampled; points (EPSG:32631, WGS 84 / UTM 31N,
@@ -469,9 +468,9 @@ def check_allocation(
 ) -> pd.DataFrame:
     """Sites whose ``id_station`` isn't the gauge of our allocation.
 
-    A check only (vault D-027): ``id_station`` comes from the workmate's
-    ArcGIS polygons and is never changed. Phase 1 found 4 of 336 points on
-    a boundary where the two disagree.
+    A check only: ``id_station`` comes from the workmate's ArcGIS polygons
+    and is never changed. The validation (scripts/validate_cost_allocation.py)
+    found 4 of 336 points on a boundary where the two disagree.
 
     Parameters
     ----------
@@ -515,6 +514,54 @@ def check_allocation(
     ].assign(allocated_id_station=allocated[differs])
 
 
+def allocate_points(
+    settings: CostDistanceSettings,
+    data_path: Path,
+    stations: pd.DataFrame,
+    x: np.ndarray,
+    y: np.ndarray,
+) -> np.ndarray:
+    """The gauge of our allocation at each point (its slope-weighted polygon).
+
+    For points the workmate's ArcGIS allocation doesn't list (inventory
+    rockfalls missing from event_stations.csv). Our allocation reproduces
+    ArcGIS's on 99.37% of the land cells and 332 of its 336 points, so it
+    stands in for it only where ArcGIS gives nothing; it never replaces a
+    given ``id_station``. Builds the graph (~1.2 GB while it lives).
+
+    Parameters
+    ----------
+    settings : CostDistanceSettings
+        Terrain rasters and neighbourhood.
+    data_path : pathlib.Path
+        The data folder.
+    stations : pandas.DataFrame
+        ``stations.csv`` (``id``, ``utm_x``, ``utm_y``).
+    x, y : numpy.ndarray
+        Point coordinates (``POINTS_CRS``).
+
+    Returns
+    -------
+    numpy.ndarray
+        Gauge id per point; ``NO_GAUGE`` if the point is off the grid (the
+        sea) or no gauge reaches it.
+    """
+    terrain = load_terrain(settings, data_path)
+    graph = build_graph(terrain, settings.neighbours)
+    gauge_nodes = cells_of_points(
+        terrain,
+        stations["utm_x"].to_numpy(),
+        stations["utm_y"].to_numpy(),
+        POINTS_CRS,
+    )
+    gauge_of_node, _ = allocate(graph, gauge_nodes, stations["id"].to_numpy())
+    nodes = cells_of_points(terrain, np.asarray(x), np.asarray(y), POINTS_CRS)
+    gauges = np.full(len(nodes), NO_GAUGE, dtype=np.int64)
+    on_land = nodes != NO_NODE
+    gauges[on_land] = gauge_of_node[nodes[on_land]]
+    return gauges
+
+
 def costs_for_samples(
     settings: CostDistanceSettings,
     data_path: Path,
@@ -553,7 +600,7 @@ def costs_for_samples(
     if not disagreements.empty:
         logger.warning(
             "%d sites have an id_station that differs from our allocation "
-            "(kept as given, vault D-027; see allocation_check.csv):\n%s",
+            "(kept as given; see allocation_check.csv):\n%s",
             len(disagreements),
             disagreements.to_string(index=False),
         )

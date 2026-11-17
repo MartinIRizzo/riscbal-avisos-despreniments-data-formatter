@@ -1,7 +1,8 @@
 # Settings of a formatter run (read by data_formatter/config.py).
 #
 # Everything that changes how the dataset is built lives here. The optional
-# steps (negative_shift, temporal_controls, fallback) are switched on and off
+# steps (inventory_realignment, negative_shift, temporal_controls, fallback,
+# cost_distance) are switched on and off
 # with the `enabled` field of their own section. Each run records these
 # values, and a copy of this file, in runs/<run_id>/, so an export can always
 # be traced back to the settings that made it.
@@ -26,11 +27,20 @@ gauges:
     - {municipality: Esporles, after: "2024-03-25", until: "2025-03-25", gauge: GRO08}
     - {municipality: Esporles, after: "2026-01-20", until: "2026-01-21", gauge: BAR04}
 
+# The inventory (data/inventari_depurat_coordenades.csv) is two tables side
+# by side, and in part of the file the record columns (date, description)
+# sit on another event's line. On: each event gets the record whose FID_1 is
+# its OBJECTID - 1 (data_formatter/inventory_alignment.py); the run stops if a
+# joined line contradicts itself, and writes inventory_realignment.csv.
+# Off: the file is read as it is (the exports before 2026-11-16).
+inventory_realignment:
+  enabled: true
+
 # Original negative sampling: move `share` of the random points to a random
 # day with rain >= the station's `percentile`, within `period`.
 negative_shift:
-  # Phase B0 (2026-10-17): OFF. Moving negatives to high-rainfall days made
-  # every model learn "more rain -> less risk" (vault: D-008).
+  # OFF since 2026-10-17. Moving negatives to high-rainfall days made
+  # every model learn "more rain -> less risk".
   enabled: false
   share: 0.4
   percentile: 0.95
@@ -41,7 +51,7 @@ negative_shift:
 # rockfalls at AEMET gauges get controls; the RiscBal gauges get none for now
 # (duplicated 10-minute records).
 temporal_controls:
-  # Phase B1: non-rockfall days at each rockfall's site (vault: D-009).
+  # Non-rockfall days at each rockfall's site.
   enabled: true
   per_rockfall: 10
   # No control within this many days of any rockfall at the same gauge.
@@ -55,23 +65,23 @@ temporal_controls:
 # Replacement gauge (see data_formatter/gauge_fallback.py): if a sample's
 # own gauge didn't measure its window, a twin of it, or else the gauge of
 # the slope-weighted polygon the sample falls in when the polygons are
-# recomputed with only the gauges that measured it (cost_distance on; vault
-# D-029), if their daily rain agrees with the own gauge; otherwise the
+# recomputed with only the gauges that measured it (cost_distance on),
+# if their daily rain agrees with the own gauge; otherwise the
 # sample is excluded (reported in exclusions.csv, in every run). Days of -4
-# runs are not measured (vault: D-015).
+# runs are not measured.
 fallback:
   # Under-measured samples read rain from another gauge or are excluded
-  # (vault: D-012, D-021). Off: every sample keeps its own gauge.
+  # Off: every sample keeps its own gauge.
   enabled: true
   # Same threshold as the temporal controls (real readings only).
   min_coverage: 0.9
   require_event_day: true
-  # Rule before D-029, used only with cost_distance off (the nearest gauge
+  # Rule before the per-sample reallocation, used only with cost_distance off (the nearest gauge
   # within this distance) and, with it on, for the old_rule_* comparison
   # columns of gauge_fallback.csv. The reallocation has no distance limit.
   max_distance_km: 5.0
   # A twin (same code +/- a suffix, e.g. B158 / B158X) must be this close
-  # to the own gauge, unless r > min_r (vault: D-021).
+  # to the own gauge, unless r > min_r.
   twin_max_distance_km: 1.0
   # Pearson r of the daily rain of the two gauges, on their common real
   # readings in correlation_period: at least min_common_days of them
@@ -83,12 +93,12 @@ fallback:
 # Slope-weighted cost distance to the gauges (see
 # data_formatter/cost_distance.py): reproduces the workmate's ArcGIS
 # Distance Allocation, the slope-weighted Thiessen polygons that gave
-# id_station (vault: D-027, "Cost-distance Thiessen polygons").
+# id_station.
 cost_distance:
-  # On: replacement gauges by per-sample reallocation (vault D-029), and
+  # On: replacement gauges by per-sample reallocation, and
   # every run writes allocation_check.csv (id_station vs our allocation).
-  # Off: the nearest gauge within fallback.max_distance_km (rule before
-  # D-029). Also read by scripts/validate_cost_allocation.py.
+  # Off: the nearest gauge within fallback.max_distance_km (the rule before
+  # the reallocation). Also read by scripts/validate_cost_allocation.py.
   enabled: true
   # Relative to paths.data. EPSG:25831, 20 m cells, exported from the
   # workmate's TFM_Martin_Rizzo.gdb (DEM: our 2 m IDEIB DEM of 2024,
